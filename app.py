@@ -170,8 +170,8 @@ def option_alpha_trigger():
 
 # instrinsic poke
 # Strict poke settings
-POKE_INTERVAL = 20 * 60  # 20 minutes in seconds
-POKE_WINDOW_START = dt_time(hour=13, minute=0)   # 1:00 PM ET
+POKE_INTERVAL = 30 * 60  # 20 minutes in seconds
+POKE_WINDOW_START = dt_time(hour=13, minute=30)   # 1:00 PM ET
 POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET
 
 def poke_self():

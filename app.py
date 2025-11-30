@@ -28,8 +28,8 @@ if not all([OPENAI_API_KEY, NEWS_API_KEY, trade_url, no_trade_url]):
 API_URL = "https://api.openai.com/v1/chat/completions"
 NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
 TRADING_TIMEZONE = ZoneInfo("America/New_York")
-TRADING_WINDOW_START = time(hour=13, minute=30)
-TRADING_WINDOW_END = time(hour=15, minute=55)
+TRADING_WINDOW_START = dt_time(hour=13, minute=30)
+TRADING_WINDOW_END = dt_time(hour=15, minute=55)
 
 
 
@@ -171,19 +171,20 @@ def option_alpha_trigger():
 # instrinsic poke
 # Strict poke settings
 POKE_INTERVAL = 20 * 60  # 20 minutes in seconds
-TRADING_WINDOW_START = dt_time(hour=13, minute=0)   # 1:00 PM ET
-TRADING_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET
+POKE_WINDOW_START = dt_time(hour=13, minute=0)   # 1:00 PM ET
+POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET
 
 def poke_self():
     """Background thread to poke /option_alpha_trigger every 20 mins strictly during trading window."""
+    port = os.environ.get("PORT", "8080")
     while True:
         now = datetime.now(TRADING_TIMEZONE)
         # Only Mon-Fri
         if now.weekday() < 5:  
             current_time = now.time()
-            if TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END:
+            if POKE_WINDOW_START <= current_time <= POKE_WINDOW_END:
                 try:
-                    url = f"http://127.0.0.1:5000/option_alpha_trigger"
+                    url = f"http://127.0.0.1:{port}/option_alpha_trigger"
                     r = requests.get(url)
                     print(f"[{now}] Poked self, status {r.status_code}")
                 except Exception as e:
@@ -197,9 +198,14 @@ def poke_self():
         time.sleep(POKE_INTERVAL)
 
 if __name__ == "__main__":
+    # Get port from environment variable (Railway sets this)
+    port = int(os.environ.get("PORT", 8080))
+    
     # 启动后台线程
     t = threading.Thread(target=poke_self)
     t.daemon = True
     t.start()
+    
     # 启动 Flask
-    app.run(host="0.0.0.0", port=8080)
+    print(f"Starting Flask app on port {port}")
+    app.run(host="0.0.0.0", port=port)

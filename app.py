@@ -12,134 +12,402 @@ except ImportError:
 
 app = Flask(__name__)
 
-
-
-# 从环境变量获取 secrets
+# Environment variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 trade_url = os.environ.get("TRADE_URL")
 no_trade_url = os.environ.get("NO_TRADE_URL")
 
-# 检查是否存在
+# Check required variables
 if not all([OPENAI_API_KEY, NEWS_API_KEY, trade_url, no_trade_url]):
     raise ValueError("Some environment variables are missing.")
 
-    
+
+# API endpoints
 API_URL = "https://api.openai.com/v1/chat/completions"
 NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
 TRADING_TIMEZONE = ZoneInfo("America/New_York")
 
-# Trading window for endpoint access (when the web app accepts requests)
+# Trading window - matches your Option Alpha scanner (1:30-4:00 PM)
 TRADING_WINDOW_START = dt_time(hour=13, minute=30)  # 1:30 PM ET
-TRADING_WINDOW_END = dt_time(hour=15, minute=55)    # 3:55 PM ET
+TRADING_WINDOW_END = dt_time(hour=16, minute=0)     # 4:00 PM ET
 
-# Poke settings
-POKE_INTERVAL = 30 * 60  # 30 minutes in seconds
-POKE_WINDOW_START = dt_time(hour=13, minute=30)   # 1:30 PM ET
-POKE_WINDOW_END = dt_time(hour=15, minute=55)      # 3:55 PM ET
-
+# Poke settings - check every 30 mins during entry window
+POKE_INTERVAL = 30 * 60  # 30 minutes
+POKE_WINDOW_START = dt_time(hour=13, minute=30)  # 1:30 PM ET
+POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET (last check before close)
 
 
 def fetch_breaking_news():
-    """ Fetches the latest general news headlines and descriptions from newsapi.org. """ # QUESTION: How to determine latest (timeframe needs to be defined)?
-    params = {
-        'apiKey': NEWS_API_KEY,
-        'language': 'en',
-        'sortBy': 'publishedAt',
-        'pageSize': 5  # Get the top 5 headlines for context
-    }
-    response = requests.get(NEWS_API_URL, params=params)
+    """
+    Fetches market-relevant news with time-weighted relevance
     
-    if response.status_code != 200:
-        raise Exception(f"News API request failed: {response.text}")
-    
-    news_data = response.json().get("articles", [])
+    Strategy:
+    - Recent news (last 3 hours): Most relevant for overnight risk
+    - US business news: Direct SPX impact
+    - Global market news: Overnight spillover
+    - Geopolitical news: 24/7 shock risk
+    """
+    try:
+        # Calculate time window (last 3 hours - optimal for afternoon trading)
+        # Captures: Recent developments without too much already-priced news
+        now = datetime.now(TRADING_TIMEZONE)
+        three_hours_ago = now - timedelta(hours=3)
+        from_time = three_hours_ago.strftime("%Y-%m-%dT%H:%M:%S")
+        
+        all_articles = []
+        
+        # Query 1: US Business/Financial (most relevant)
+        params_business = {
+            'apiKey': NEWS_API_KEY,
+            'language': 'en',
+            'category': 'business',
+            'country': 'us',
+            'sortBy': 'publishedAt',
+            'from': from_time,  # Last 3 hours
+            'pageSize': 10
+        }
+        
+        # Query 2: Market-specific keywords (catches breaking developments)
+        params_market = {
+            'apiKey': NEWS_API_KEY,
+            'language': 'en',
+            'sortBy': 'publishedAt',
+            'from': from_time,  # Last 3 hours
+            'q': 'stock OR market OR fed OR economy OR bank OR "wall street" OR crisis OR volatility',
+            'pageSize': 10
+        }
+        
+        # Query 3: Geopolitical/Global (overnight spillover risk)
+        params_global = {
+            'apiKey': NEWS_API_KEY,
+            'language': 'en',
+            'sortBy': 'publishedAt',
+            'from': from_time,  # Last 3 hours
+            'q': 'geopolitical OR war OR conflict OR central bank OR "global markets"',
+            'pageSize': 5
+        }
+        
+        # Fetch all three categories
+        for params in [params_business, params_market, params_global]:
+            try:
+                response = requests.get(NEWS_API_URL, params=params, timeout=10)
+                if response.status_code == 200:
+                    articles = response.json().get("articles", [])
+                    all_articles.extend(articles)
+            except Exception as e:
+                print(f"Error fetching news category: {e}")
+                continue
+        
+        # Deduplicate by title
+        seen_titles = set()
+        unique_articles = []
+        for article in all_articles:
+            title = article.get('title', '')
+            if title and title not in seen_titles and len(title) > 10:
+                seen_titles.add(title)
+                unique_articles.append(article)
+        
+        # Sort by published time (most recent first)
+        unique_articles.sort(
+            key=lambda x: x.get('publishedAt', ''), 
+            reverse=True
+        )
+        
+        # Take top 15 most recent
+        unique_articles = unique_articles[:15]
+        
+        if not unique_articles:
+            print("Warning: No recent market news found, using fallback")
+            # Fallback: Get top headlines without time filter
+            params_fallback = {
+                'apiKey': NEWS_API_KEY,
+                'language': 'en',
+                'category': 'business',
+                'country': 'us',
+                'pageSize': 5
+            }
+            response = requests.get(NEWS_API_URL, params=params_fallback, timeout=10)
+            if response.status_code == 200:
+                unique_articles = response.json().get("articles", [])[:5]
+        
+        if not unique_articles:
+            return [], "No market news available."
+        
+        # Format for GPT
+        news_headlines = [article['title'] for article in unique_articles]
+        
+        # Create detailed summary with timestamps
+        news_summary = ""
+        for article in unique_articles:
+            title = article.get('title', 'N/A')
+            description = article.get('description', 'N/A')
+            published = article.get('publishedAt', 'N/A')
+            source = article.get('source', {}).get('name', 'Unknown')
+            
+            # Parse timestamp to show how recent
+            try:
+                pub_time = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                pub_time_et = pub_time.astimezone(TRADING_TIMEZONE)
+                time_str = pub_time_et.strftime("%I:%M %p")
+            except:
+                time_str = "Earlier"
+            
+            news_summary += f"[{time_str}] {source}: {title}\n   {description}\n\n"
+        
+        print(f"Fetched {len(unique_articles)} relevant news items from last 3 hours")
+        return news_headlines, news_summary.strip()
+        
+    except Exception as e:
+        print(f"Error in fetch_breaking_news: {e}")
+        return [], "Unable to fetch news data."
 
-    # Extract headlines and descriptions
-    news_headlines = [article['title'] for article in news_data]
-    news_summary = "\n".join([f"- {article['title']}: {article['description']}" for article in news_data])
-    
-    return news_headlines, news_summary if news_summary else "No breaking news available."
 
 def parse_gpt_response(response_text):
-    """Clean and parse GPT response as JSON."""
+    """Clean and parse GPT response as JSON"""
     try:
-        # Remove any backticks and any "json" markers, then strip whitespace
-        cleaned_response = response_text.replace("```", "").replace("json", "").strip()
-
-        # Print cleaned response for debugging
+        cleaned_response = response_text.replace("```json", "").replace("```", "").strip()
         print("Cleaned GPT response:", cleaned_response)
-
-        # Attempt to parse as JSON
         parsed_response = json.loads(cleaned_response)
         return parsed_response
     except json.JSONDecodeError as e:
         print(f"Failed to parse GPT response as JSON. Response was: {response_text}. Error: {e}")
-        # Return a fallback to avoid triggering false positives
-        return {"impact": "Unknown", "explanation": "Unable to parse ChatGPT JSON response due to formatting issues."}
+        return {
+            "overnight_risk_score": 5,
+            "recommendation": "REDUCE_SIZE",
+            "reasoning": "Unable to parse GPT response due to formatting issues."
+        }
+
 
 def ask_gpt(prompt):
+    """Send prompt to GPT-4 and get response"""
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
     data = {
-        "model": "gpt-4-turbo",  # Adjust model name if necessary
+        "model": "gpt-4-turbo",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 150,
-        "logprobs": True,  # Log the completion for viewing in the OpenAI API dashboard
+        "max_tokens": 300,
+        "temperature": 0.3,  # Lower temperature for more consistent analysis
     }
     response = requests.post(API_URL, headers=headers, json=data)
+    
     if response.status_code != 200:
         raise Exception(f"OpenAI API request failed: {response.text}")
     
     result_text = response.json()["choices"][0]["message"]["content"].strip()
-    
-    # Parse response as JSON using parse_gpt_response
     return parse_gpt_response(result_text)
 
-def analyze_impact(news_summary):
-    # Refined prompt focusing on volatility and confidence in prediction
-    prompt = (
-        f"The following is a summary of recent breaking news events:\n{news_summary}\n\n"
-        "Please determine if any of these events are likely to increase market volatility in the S&P 500 index (SPX) "
-        "by more than 1.5 basis points. Focus on assessing conditions that disrupt a stable market, such as major geopolitical events, "
-        "unexpected macroeconomic announcements, or policy decisions.\n\n"
-        "When responding, consider:\n"
-        "- Historical impact of similar events on SPX volatility.\n"
-        "- Likelihood of influencing investor sentiment or causing significant price fluctuations.\n"
-        "- Severity and unexpected nature of the event.\n\n"
-        "Provide your response in JSON format, including a confidence level:\n"
-        "{\"impact\": \"Yes\" or \"No\", \"confidence\": \"High\" or \"Low\", \"explanation\": \"Brief explanation here.\"}"
-    )
+
+def analyze_overnight_risk(news_summary):
+    """
+    GPT as PREDICTION MODEL: Forward-looking overnight escalation risk
+    Focus: Will recent developments lead to overnight gaps + IV spikes?
+    """
+    current_time = datetime.now(TRADING_TIMEZONE).strftime("%A, %B %d, %Y %I:%M %p %Z")
+    
+    prompt = f"""You are a PREDICTIVE risk model for overnight SPX options exposure.
+
+CURRENT TIME: {current_time}
+
+MY POSITION:
+- Selling SPX iron condor NOW (late afternoon entry)
+- Holding position OVERNIGHT (~16 hours)
+- Exiting tomorrow morning at target
+
+MY DUAL RISKS (occur together):
+1. Price Gap Risk: SPX gaps ±1-2% overnight → strikes breached
+2. IV Spike Risk: VIX/IV jumps overnight → expensive to exit
+→ Same shock events trigger BOTH simultaneously
+
+ALREADY FILTERED (by my system):
+✓ Scheduled FOMC, CPI, NFP, GDP releases
+✓ Known earnings (mega-caps after hours)
+✓ Pre-announced Fed speeches
+
+YOUR PREDICTION TASK:
+Based on recent news, predict: "Will there be an UNEXPECTED shock overnight that causes BOTH price gaps AND IV spikes?"
+
+RECENT NEWS (last 3 hours, time-stamped):
+{news_summary}
+
+PREDICTION FRAMEWORK - Ask these questions:
+
+1. ESCALATION POTENTIAL:
+   - Are any situations ACTIVELY DEVELOPING right now?
+   - Could they get WORSE between now and tomorrow morning?
+   - Is this the START of something bigger or RESOLUTION of something?
+
+2. TIMING RISK:
+   - Did critical news just break in last 1-2 hours?
+   - Is there INSUFFICIENT market reaction time before close?
+   - Could after-hours/overnight bring NEW developments?
+
+3. CONTAGION RISK:
+   - Is this ISOLATED or could it SPREAD?
+   - Are there SYSTEMIC implications?
+   - Could one problem trigger others overnight?
+
+4. SURPRISE FACTOR:
+   - Was this EXPECTED or UNEXPECTED?
+   - Is the market COMPLACENT about this risk?
+   - Could morning bring SHOCKING updates?
+
+THREAT CATEGORIES (Unscheduled shocks only):
+
+🚨 GEOPOLITICAL ESCALATION:
+- Wars/conflicts suddenly intensifying
+- Major attacks or military action
+- Regime changes, coups
+- Trade war surprise escalations
+
+🏦 FINANCIAL CONTAGION:
+- Bank failures or liquidity crises
+- Credit market freezes
+- Major bankruptcy filings (systemic)
+- Margin calls / forced liquidations
+
+⚡ POLICY SHOCKS:
+- Emergency Fed actions (unscheduled)
+- Surprise regulatory moves
+- Major policy U-turns
+- Government shutdowns / debt ceiling
+
+📰 BREAKING CRISES:
+- Major corporate frauds revealed
+- Cyber attacks on financial systems
+- Natural disasters (major economic impact)
+- Pandemic developments
+
+PREDICTION SCALE (1-10):
+
+1-3: VERY LOW OVERNIGHT RISK → TRADE
+→ Normal stable news flow
+→ No developing crises
+→ Market has digested all information
+→ Expected: Quiet overnight, normal theta/IV decay
+→ Prediction: 95%+ chance of calm overnight
+
+4-6: MODERATE RISK → TRADE (with caution)
+→ Some developments but manageable
+→ Market awareness is adequate
+→ Low probability of major shock
+→ Expected: Likely calm, possible minor movement
+→ Prediction: 80-90% chance of manageable overnight
+
+7-8: HIGH RISK → SKIP
+→ Active crisis unfolding RIGHT NOW
+→ High probability of overnight deterioration
+→ Market showing stress signals
+→ Expected: Likely gap and/or IV spike
+→ Prediction: 40-60% chance of significant shock
+
+9-10: EXTREME RISK → SKIP
+→ Major crisis in full swing
+→ Very high certainty of overnight chaos
+→ Systemic implications clear
+→ Expected: Almost certain gap + IV explosion
+→ Prediction: 70%+ chance of major overnight shock
+
+DECISION THRESHOLD:
+• Scores 1-6: TRADE (overnight risk acceptable)
+• Scores 7-10: SKIP (overnight risk too high)
+
+RESPOND IN JSON (no markdown, no backticks):
+{{
+  "developing_threats": "List specific situations that could ESCALATE overnight, or 'None - stable conditions'",
+  "late_breaking_news": "Any news from last 1-2 hours that market hasn't fully absorbed? Or 'None'",
+  "overnight_escalation_probability": "Low/Moderate/High - likelihood things get WORSE overnight",
+  "gap_risk_score": <1-10>,
+  "iv_spike_risk_score": <1-10>,
+  "overall_risk_score": <1-10>,
+  "recommendation": "TRADE" or "SKIP",
+  "reasoning": "2-3 sentences: What could happen overnight? Why this risk level? What's the FORWARD-LOOKING concern?"
+}}
+
+CRITICAL CALIBRATION:
+• BASELINE = 1-2 (70% of days are quiet, nothing brewing)
+• Only elevate if there's FORWARD-LOOKING escalation risk
+• "News happened" ≠ risk (if fully absorbed by market already)
+• "News developing" = risk (if could worsen overnight)
+• Ask: "Between now and 9:30 AM tomorrow, could this explode?"
+• Be realistic: Stable situations = low scores, not moderate
+
+EXAMPLES:
+
+Score 2: "Markets closed mixed on light volume, no major developments"
+→ Nothing brewing, normal overnight expected
+
+Score 3: "Fed official reiterates rates stance, tech stocks slightly down"  
+→ Already priced, no surprise element
+
+Score 6: "Regional bank reports Q4 loss, stock down 8%, analysts monitoring"
+→ Developing situation, could see more bank issues tomorrow, moderate escalation risk
+
+Score 8: "Major bank halts withdrawals, regulators in emergency talks, contagion fears"
+→ Active crisis, high probability of overnight deterioration, systemic implications"""
+
     return ask_gpt(prompt)
 
-def is_trade_recommended(impact_analysis):
-    impact = impact_analysis.get("impact", "").lower()
-    confidence = impact_analysis.get("confidence", "").lower()
+
+def is_trade_recommended(risk_analysis):
+    """
+    Binary decision: Trade or Skip (no half-sizing for 1-contract trading)
+    Returns: (should_trade: bool, position_size: float, reason: str)
+    """
+    recommendation = risk_analysis.get("recommendation", "TRADE_HALF").upper()
+    overall_risk = risk_analysis.get("overall_risk_score", 5)
+    gap_risk = risk_analysis.get("gap_risk_score", 5)
+    iv_risk = risk_analysis.get("iv_spike_risk_score", 5)
+    reasoning = risk_analysis.get("reasoning", "No reasoning provided")
+    threats = risk_analysis.get("threats_detected", "Unknown")
     
-    # Only pause trading if both impact is "Yes" and confidence is "High"
-    return not (impact == "yes" and confidence == "high")
+    # Simple binary decision: Trade if low-moderate risk, Skip if high risk
+    # Threshold: Score 7+ = Skip, Score <7 = Trade
+    if overall_risk >= 7:
+        return (
+            False, 
+            0.0, 
+            f"HIGH RISK - Skip trade (Overall: {overall_risk}, Gap: {gap_risk}, IV: {iv_risk}). "
+            f"Threats: {threats}. {reasoning}"
+        )
+    else:
+        return (
+            True, 
+            1.0, 
+            f"TRADE - Risk acceptable (Overall: {overall_risk}, Gap: {gap_risk}, IV: {iv_risk}). "
+            f"{reasoning}"
+        )
+
 
 def is_within_trading_window(now=None):
-    """Return True when current time is Mon-Fri between 1:30-3:55 PM Eastern."""
+    """Check if current time is within trading window"""
     now = now or datetime.now(TRADING_TIMEZONE)
-    if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+    if now.weekday() >= 5:  # Weekend
         return False
     current_time = now.time()
     return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
 
-def trigger_option_alpha(url):
+
+def trigger_option_alpha(url, position_size=1.0):
+    """
+    Trigger Option Alpha webhook
+    Note: You might want to modify Option Alpha automation to accept position sizing parameter
+    """
     try:
+        # If your Option Alpha allows, you could pass position_size as parameter
+        # For now, just trigger the webhook
         response = requests.post(url)
         return response.status_code == 200
     except Exception as e:
         print(f"Error triggering Option Alpha: {e}")
         return False
 
+
 @app.route("/", methods=["GET"])
 def homepage():
-    """Homepage with app information and status"""
+    """Homepage with strategy information and status"""
     now = datetime.now(TRADING_TIMEZONE)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     in_window = is_within_trading_window(now)
@@ -155,13 +423,13 @@ def homepage():
         next_poke = datetime.combine(next_poke_date.date(), POKE_WINDOW_START)
         next_poke = next_poke.replace(tzinfo=TRADING_TIMEZONE)
         next_poke_str = next_poke.strftime("%A, %B %d at %I:%M %p %Z")
-        status = "WEEKEND - Pokes paused"
+        status = "WEEKEND - No trading"
     elif not in_window:
         if now.time() < POKE_WINDOW_START:
             next_poke = datetime.combine(now.date(), POKE_WINDOW_START)
             next_poke = next_poke.replace(tzinfo=TRADING_TIMEZONE)
             next_poke_str = f"Today at {next_poke.strftime('%I:%M %p %Z')}"
-            status = "WAITING - Before trading window"
+            status = "PRE-MARKET - Waiting for entry window"
         else:
             tomorrow = now + timedelta(days=1)
             while tomorrow.weekday() >= 5:
@@ -169,46 +437,57 @@ def homepage():
             next_poke = datetime.combine(tomorrow.date(), POKE_WINDOW_START)
             next_poke = next_poke.replace(tzinfo=TRADING_TIMEZONE)
             next_poke_str = next_poke.strftime("%A, %B %d at %I:%M %p %Z")
-            status = "DONE - After trading window"
+            status = "MARKET CLOSED - Done for today"
     else:
-        next_poke_str = "Active - poking every 30 minutes"
-        status = "ACTIVE - Trading window open"
+        next_poke_str = "Active - checking every 30 minutes"
+        status = "ACTIVE - Entry window open!"
     
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>GPT-4 Trade Indicator</title>
+        <title>SPX Overnight Iron Condor Bot</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body {{
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                max-width: 800px;
+                max-width: 900px;
                 margin: 40px auto;
                 padding: 20px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
                 color: #333;
             }}
             .container {{
                 background: white;
-                border-radius: 10px;
-                padding: 30px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                border-radius: 12px;
+                padding: 35px;
+                box-shadow: 0 15px 50px rgba(0,0,0,0.3);
             }}
             h1 {{
-                color: #667eea;
+                color: #1e3c72;
                 margin-top: 0;
-                display: flex;
-                align-items: center;
-                gap: 10px;
+                font-size: 28px;
+                border-bottom: 3px solid #2a5298;
+                padding-bottom: 15px;
+            }}
+            .strategy-box {{
+                background: #f0f7ff;
+                border-left: 5px solid #2a5298;
+                padding: 20px;
+                margin: 20px 0;
+                border-radius: 5px;
+            }}
+            .strategy-box h3 {{
+                margin-top: 0;
+                color: #1e3c72;
             }}
             .status {{
                 display: inline-block;
-                padding: 8px 16px;
-                border-radius: 20px;
+                padding: 10px 20px;
+                border-radius: 25px;
                 font-weight: bold;
-                font-size: 14px;
-                margin-bottom: 20px;
+                font-size: 15px;
+                margin: 15px 0;
             }}
             .status.active {{
                 background: #10b981;
@@ -224,20 +503,21 @@ def homepage():
             }}
             .info-grid {{
                 display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
                 gap: 15px;
-                margin: 20px 0;
+                margin: 25px 0;
             }}
             .info-item {{
-                padding: 15px;
+                padding: 18px;
                 background: #f9fafb;
                 border-radius: 8px;
-                border-left: 4px solid #667eea;
+                border-left: 4px solid #2a5298;
             }}
             .info-item strong {{
                 display: block;
-                color: #667eea;
-                margin-bottom: 5px;
-                font-size: 12px;
+                color: #1e3c72;
+                margin-bottom: 8px;
+                font-size: 13px;
                 text-transform: uppercase;
                 letter-spacing: 0.5px;
             }}
@@ -252,22 +532,29 @@ def homepage():
             }}
             .endpoint {{
                 background: #f3f4f6;
-                padding: 12px;
+                padding: 14px;
                 border-radius: 6px;
-                margin: 10px 0;
+                margin: 12px 0;
                 font-family: 'Courier New', monospace;
                 font-size: 14px;
             }}
             .endpoint a {{
-                color: #667eea;
+                color: #2a5298;
                 text-decoration: none;
                 font-weight: bold;
             }}
             .endpoint a:hover {{
                 text-decoration: underline;
             }}
+            .warning {{
+                background: #fef3c7;
+                border-left: 5px solid #f59e0b;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 5px;
+            }}
             footer {{
-                margin-top: 30px;
+                margin-top: 35px;
                 padding-top: 20px;
                 border-top: 1px solid #e5e7eb;
                 color: #6b7280;
@@ -278,9 +565,16 @@ def homepage():
     </head>
     <body>
         <div class="container">
-            <h1>
-                📈 GPT-4 Trade Indicator
-            </h1>
+            <h1>📊 SPX Overnight Iron Condor Bot</h1>
+            
+            <div class="strategy-box">
+                <h3>🎯 Strategy Overview</h3>
+                <p><strong>Entry:</strong> 1:30-4:00 PM ET (afternoon positioning)</p>
+                <p><strong>Product:</strong> SPX Iron Condor (0-1 DTE)</p>
+                <p><strong>Hold:</strong> Overnight</p>
+                <p><strong>Exit:</strong> Next morning at 15% profit target</p>
+                <p><strong>Edge:</strong> Capture overnight risk premium decay + IV crush</p>
+            </div>
             
             <div class="status {'active' if in_window and not is_weekend else 'waiting' if not is_weekend else 'weekend'}">
                 {status}
@@ -293,38 +587,44 @@ def homepage():
                 </div>
                 
                 <div class="info-item">
-                    <strong>Day</strong>
+                    <strong>Trading Day</strong>
                     <span>{day_name} {'(Weekend)' if is_weekend else '(Weekday)'}</span>
                 </div>
                 
                 <div class="info-item">
-                    <strong>Trading Window</strong>
-                    <span>Mon-Fri, 1:30-3:55 PM ET</span>
+                    <strong>Entry Window</strong>
+                    <span>Mon-Fri, 1:30-4:00 PM ET</span>
                 </div>
                 
                 <div class="info-item">
-                    <strong>Poke Interval</strong>
+                    <strong>Check Interval</strong>
                     <span>Every 30 minutes</span>
                 </div>
                 
                 <div class="info-item">
-                    <strong>Next Poke</strong>
+                    <strong>Next Check</strong>
                     <span>{next_poke_str}</span>
                 </div>
+            </div>
+            
+            <div class="warning">
+                <strong>⚠️ Risk Management Active</strong><br>
+                Bot analyzes overnight gap risk using GPT-4 before each trade decision.
+                Skips high-risk days automatically.
             </div>
             
             <div class="endpoints">
                 <h3>📡 Available Endpoints</h3>
                 <div class="endpoint">
-                    <a href="/health">/health</a> - System health check
+                    <a href="/health">/health</a> - Quick system health check
                 </div>
                 <div class="endpoint">
-                    <a href="/option_alpha_trigger">/option_alpha_trigger</a> - Main trading signal endpoint
+                    <a href="/option_alpha_trigger">/option_alpha_trigger</a> - Trade decision endpoint
                 </div>
             </div>
             
             <footer>
-                🤖 Automated Trading Signal System | Powered by GPT-4 & Railway
+                🤖 Overnight Premium Capture System | GPT-4 Risk Analysis | Railway Hosting
             </footer>
         </div>
     </body>
@@ -332,64 +632,10 @@ def homepage():
     """
     return html
 
-@app.route("/option_alpha_trigger", methods=["GET", "POST"])
-def option_alpha_trigger():
-    now = datetime.now(TRADING_TIMEZONE)
-    timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-    
-    # Log every request
-    print(f"[{timestamp}] Received request to /option_alpha_trigger")
-    
-    try:
-        if not is_within_trading_window(now):
-            message = f"Outside trading window (Mon-Fri 1:30-3:55 PM ET); request rejected at {timestamp}"
-            print(f"[{timestamp}] {message}")
-            return jsonify({
-                "status": "rejected",
-                "message": message,
-                "current_time": timestamp
-            }), 200
-        
-        print(f"[{timestamp}] Within trading window - processing request")
-        
-        # Step 1: Fetch breaking news headlines and summary
-        news_headlines, news_summary = fetch_breaking_news()
-        print(f"[{timestamp}] Fetched {len(news_headlines)} news headlines")
-        
-        # Step 2: Analyze impact of breaking news on SPX
-        impact_analysis = analyze_impact(news_summary)
-        print(f"[{timestamp}] GPT analysis complete - Impact: {impact_analysis.get('impact')}, Confidence: {impact_analysis.get('confidence')}")
-        
-        # Step 3: Get explanation for the output and determine trading action
-        explanation = impact_analysis.get("explanation", "No explanation provided.")
-        if is_trade_recommended(impact_analysis):
-            # If GPT suggests stability, trigger trade URL
-            success = trigger_option_alpha(trade_url)
-            message = "Market conditions are stable; trading triggered." if success else "Failed to trigger trading."
-            print(f"[{timestamp}] Trade decision: EXECUTE - {message}")
-        else:
-            # If GPT suggests high-confidence volatility, trigger no-trade URL
-            success = trigger_option_alpha(no_trade_url)
-            message = "High confidence of volatility detected; trading paused." if success else "Failed to trigger no-trade."
-            print(f"[{timestamp}] Trade decision: PAUSE - {message}")
-
-        # Output the result message, including news and GPT explanation
-        return jsonify({
-            "status": "success",
-            "message": message,
-            "timestamp": timestamp,
-            "news_headlines": news_headlines,
-            "news_summary": news_summary,
-            "gpt_explanation": explanation
-        }), 200
-    except Exception as e:
-        error_msg = f"An error occurred: {e}"
-        print(f"[{timestamp}] ERROR: {error_msg}")
-        return jsonify({"status": "error", "message": str(e), "timestamp": timestamp}), 500
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint to verify app is running"""
+    """Health check endpoint"""
     now = datetime.now(TRADING_TIMEZONE)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     in_window = is_within_trading_window(now)
@@ -397,57 +643,147 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": timestamp,
-        "trading_window_active": in_window,
-        "trading_window": "Mon-Fri 1:30-3:55 PM ET"
+        "entry_window_active": in_window,
+        "entry_window": "Mon-Fri 1:30-4:00 PM ET",
+        "strategy": "SPX overnight iron condor"
     }), 200
 
+
+@app.route("/option_alpha_trigger", methods=["GET", "POST"])
+def option_alpha_trigger():
+    """
+    Main trading decision endpoint
+    Analyzes overnight risk and triggers appropriate webhook
+    """
+    now = datetime.now(TRADING_TIMEZONE)
+    timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+    
+    print(f"[{timestamp}] Received request to /option_alpha_trigger")
+    
+    try:
+        # Check if within trading window
+        if not is_within_trading_window(now):
+            message = f"Outside entry window (Mon-Fri 1:30-4:00 PM ET); request rejected"
+            print(f"[{timestamp}] {message}")
+            return jsonify({
+                "status": "rejected",
+                "message": message,
+                "current_time": timestamp
+            }), 200
+        
+        print(f"[{timestamp}] Within entry window - analyzing overnight risk...")
+        
+        # Fetch latest news
+        news_headlines, news_summary = fetch_breaking_news()
+        print(f"[{timestamp}] Fetched {len(news_headlines)} news headlines")
+        
+        # Analyze overnight gap risk with GPT
+        risk_analysis = analyze_overnight_risk(news_summary)
+        print(f"[{timestamp}] GPT Risk Analysis: {json.dumps(risk_analysis, indent=2)}")
+        
+        # Determine trade decision
+        should_trade, position_size, reason = is_trade_recommended(risk_analysis)
+        
+        # Execute decision
+        if should_trade:
+            success = trigger_option_alpha(trade_url, position_size)
+            action = "EXECUTE TRADE" if position_size == 1.0 else f"EXECUTE TRADE ({int(position_size*100)}% size)"
+            message = f"{action} - {reason}" if success else f"Failed to trigger: {reason}"
+            print(f"[{timestamp}] Decision: {action}")
+            print(f"[{timestamp}] Webhook trigger {'successful' if success else 'failed'}")
+        else:
+            success = trigger_option_alpha(no_trade_url)
+            message = f"SKIP TRADE - {reason}"
+            print(f"[{timestamp}] Decision: SKIP - {reason}")
+            print(f"[{timestamp}] No-trade webhook trigger {'successful' if success else 'failed'}")
+        
+        # Return comprehensive response
+        return jsonify({
+            "status": "success",
+            "timestamp": timestamp,
+            "decision": "TRADE" if should_trade else "SKIP",
+            "position_size": f"{int(position_size*100)}%",
+            "message": message,
+            "risk_analysis": {
+                "overall_risk_score": risk_analysis.get("overall_risk_score"),
+                "gap_risk_score": risk_analysis.get("gap_risk_score"),
+                "iv_spike_risk_score": risk_analysis.get("iv_spike_risk_score"),
+                "threats_detected": risk_analysis.get("threats_detected"),
+                "recommendation": risk_analysis.get("recommendation"),
+                "reasoning": risk_analysis.get("reasoning")
+            },
+            "news_count": len(news_headlines),
+            "webhook_triggered": success
+        }), 200
+        
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        print(f"[{timestamp}] ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": error_msg,
+            "timestamp": timestamp
+        }), 500
+
+
 def poke_self():
-    """Background thread to poke /option_alpha_trigger every 30 mins strictly during trading window."""
+    """Background thread to check trading decision every 30 mins during entry window"""
     port = os.environ.get("PORT", "8080")
-    print(f"[POKE THREAD] Started - will poke every 30 minutes during Mon-Fri 1:30-3:55 PM ET")
+    print(f"[POKE THREAD] Started - will check every 30 minutes during Mon-Fri 1:30-3:30 PM ET")
     
     while True:
         now = datetime.now(TRADING_TIMEZONE)
         timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
         
-        # Only Mon-Fri
-        if now.weekday() < 5:  
+        # Only check on weekdays
+        if now.weekday() < 5:
             current_time = now.time()
             if POKE_WINDOW_START <= current_time <= POKE_WINDOW_END:
                 try:
                     url = f"http://127.0.0.1:{port}/option_alpha_trigger"
-                    print(f"[{timestamp}] Poking self at {url}...")
-                    r = requests.get(url, timeout=30)
-                    print(f"[{timestamp}] Poke completed - Status: {r.status_code}, Response: {r.text[:200]}")
+                    print(f"[{timestamp}] Checking trade decision at {url}...")
+                    r = requests.get(url, timeout=60)
+                    print(f"[{timestamp}] Check completed - Status: {r.status_code}")
+                    
+                    # Log the decision
+                    if r.status_code == 200:
+                        result = r.json()
+                        decision = result.get('decision', 'UNKNOWN')
+                        pos_size = result.get('position_size', 'N/A')
+                        print(f"[{timestamp}] Trade Decision: {decision} (Size: {pos_size})")
+                    
                 except Exception as e:
-                    print(f"[{timestamp}] ERROR poking self: {e}")
+                    print(f"[{timestamp}] ERROR checking trade decision: {e}")
             else:
-                print(f"[{timestamp}] Outside poke window (1:30-3:55 PM ET), skipping poke.")
+                print(f"[{timestamp}] Outside check window (1:30-3:30 PM ET), skipping check.")
         else:
             day_name = now.strftime("%A")
-            print(f"[{timestamp}] Weekend ({day_name}), skipping poke.")
+            print(f"[{timestamp}] Weekend ({day_name}), no checks needed.")
         
         # Sleep 30 minutes
-        print(f"[{timestamp}] Sleeping for 30 minutes until next poke check...")
+        print(f"[{timestamp}] Sleeping for 30 minutes until next check...")
         time.sleep(POKE_INTERVAL)
 
+
 if __name__ == "__main__":
-    # Get port from environment variable (Railway sets this)
     port = int(os.environ.get("PORT", 8080))
     
-    print(f"=" * 80)
-    print(f"Starting GPT4 Trade Indicator App")
-    print(f"=" * 80)
+    print("=" * 80)
+    print("SPX Overnight Iron Condor Strategy Bot")
+    print("=" * 80)
     print(f"Port: {port}")
-    print(f"Trading Window: Mon-Fri 1:30-3:55 PM ET")
-    print(f"Poke Interval: Every 30 minutes")
-    print(f"Poke Window: Mon-Fri 1:30-3:55 PM ET")
-    print(f"=" * 80)
+    print(f"Entry Window: Mon-Fri 1:30-4:00 PM ET")
+    print(f"Check Interval: Every 30 minutes")
+    print(f"Check Window: Mon-Fri 1:30-3:30 PM ET")
+    print("Strategy: Sell overnight premium, capture IV crush")
+    print("=" * 80)
     
-    # 启动后台线程
+    # Start background poke thread
     t = threading.Thread(target=poke_self, daemon=True)
     t.start()
     
-    # 启动 Flask
+    # Start Flask
     print(f"Starting Flask app on port {port}")
     app.run(host="0.0.0.0", port=port)

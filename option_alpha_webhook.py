@@ -2,6 +2,11 @@ from flask import Flask, jsonify
 import requests
 import os
 import json
+from datetime import datetime, time
+try:
+    from zoneinfo import ZoneInfo  # type: ignore
+except ImportError:
+    from pytz import timezone as ZoneInfo  # type: ignore
 
 app = Flask(__name__)
 
@@ -37,13 +42,16 @@ if not trade_url or not no_trade_url:
     
 API_URL = "https://api.openai.com/v1/chat/completions"
 NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
+TRADING_TIMEZONE = ZoneInfo("America/New_York")
+TRADING_WINDOW_START = time(hour=13, minute=30)
+TRADING_WINDOW_END = time(hour=15, minute=55)
 
 # Load the News API key
 with open(NEWS_API_KEY_FILE_PATH, 'r') as file:
     NEWS_API_KEY = file.read().strip()
 
 def fetch_breaking_news():
-    """Fetches the latest general news headlines and descriptions from newsapi.org."""
+    """ Fetches the latest general news headlines and descriptions from newsapi.org. """ # QUESTION: How to determine latest (timeframe needs to be defined)?
     params = {
         'apiKey': NEWS_API_KEY,
         'language': 'en',
@@ -123,6 +131,14 @@ def is_trade_recommended(impact_analysis):
     # Only pause trading if both impact is "Yes" and confidence is "High"
     return not (impact == "yes" and confidence == "high")
 
+def is_within_trading_window(now=None):
+    """Return True when current time is Mon-Fri between 1:30-4:00 PM Eastern."""
+    now = now or datetime.now(TRADING_TIMEZONE)
+    if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        return False
+    current_time = now.time()
+    return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
+
 def trigger_option_alpha(url):
     try:
         response = requests.post(url)
@@ -134,6 +150,11 @@ def trigger_option_alpha(url):
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
 def option_alpha_trigger():
     try:
+        if not is_within_trading_window():
+            return jsonify({
+                "status": "skipped",
+                "message": "Outside trading window (Mon-Fri 1:30-4:00 PM ET); action not taken."
+            }), 200
         # Step 1: Fetch breaking news headlines and summary
         news_headlines, news_summary = fetch_breaking_news()
         

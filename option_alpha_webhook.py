@@ -2,7 +2,9 @@ from flask import Flask, jsonify
 import requests
 import os
 import json
-from datetime import datetime, time
+import threading
+import time
+from datetime import datetime, time as dt_time
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except ImportError:
@@ -10,35 +12,18 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Paths to secret files
-API_KEY_FILE_PATH = "C:\\secrets\\IndicatorKey.txt"
-NEWS_API_KEY_FILE_PATH = "C:\\secrets\\NewsKey.txt"
-WEBHOOK_URLS_FILE_PATH = "C:\\secrets\\WebhookURLs.txt"
 
-# Load the OpenAI API key from file
-try:
-    with open(API_KEY_FILE_PATH, 'r') as file:
-        OPENAI_API_KEY = file.read().strip()
-except FileNotFoundError:
-    raise ValueError(f"API key file not found at {API_KEY_FILE_PATH}")
 
-# Load the Trade and No Trade webhook URLs from file
-trade_url = None
-no_trade_url = None
-try:
-    with open(WEBHOOK_URLS_FILE_PATH, 'r') as file:
-        for line in file:
-            key, value = line.strip().split('=')
-            if key == 'TRADE_URL':
-                trade_url = value
-            elif key == 'NO_TRADE_URL':
-                no_trade_url = value
-except FileNotFoundError:
-    raise ValueError(f"Webhook URLs file not found at {WEBHOOK_URLS_FILE_PATH}")
+# 从环境变量获取 secrets
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
+trade_url = os.environ.get("TRADE_URL")
+no_trade_url = os.environ.get("NO_TRADE_URL")
 
-# Ensure both URLs were loaded
-if not trade_url or not no_trade_url:
-    raise ValueError("Webhook URLs not properly configured in the secret file.")
+# 检查是否存在
+if not all([OPENAI_API_KEY, NEWS_API_KEY, trade_url, no_trade_url]):
+    raise ValueError("Some environment variables are missing.")
+
     
 API_URL = "https://api.openai.com/v1/chat/completions"
 NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
@@ -46,9 +31,7 @@ TRADING_TIMEZONE = ZoneInfo("America/New_York")
 TRADING_WINDOW_START = time(hour=13, minute=30)
 TRADING_WINDOW_END = time(hour=15, minute=55)
 
-# Load the News API key
-with open(NEWS_API_KEY_FILE_PATH, 'r') as file:
-    NEWS_API_KEY = file.read().strip()
+
 
 def fetch_breaking_news():
     """ Fetches the latest general news headlines and descriptions from newsapi.org. """ # QUESTION: How to determine latest (timeframe needs to be defined)?
@@ -184,5 +167,39 @@ def option_alpha_trigger():
         print(f"An error occurred: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+# instrinsic poke
+# Strict poke settings
+POKE_INTERVAL = 20 * 60  # 20 minutes in seconds
+TRADING_WINDOW_START = dt_time(hour=13, minute=0)   # 1:00 PM ET
+TRADING_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET
+
+def poke_self():
+    """Background thread to poke /option_alpha_trigger every 20 mins strictly during trading window."""
+    while True:
+        now = datetime.now(TRADING_TIMEZONE)
+        # Only Mon-Fri
+        if now.weekday() < 5:  
+            current_time = now.time()
+            if TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END:
+                try:
+                    url = f"http://127.0.0.1:5000/option_alpha_trigger"
+                    r = requests.get(url)
+                    print(f"[{now}] Poked self, status {r.status_code}")
+                except Exception as e:
+                    print(f"[{now}] Error poking self: {e}")
+            else:
+                print(f"[{now}] Outside poke window, skipping.")
+        else:
+            print(f"[{now}] Weekend, skipping poke.")
+        
+        # Sleep 20 minutes
+        time.sleep(POKE_INTERVAL)
+
 if __name__ == "__main__":
-    app.run(port=5000)
+    # 启动后台线程
+    t = threading.Thread(target=poke_self)
+    t.daemon = True
+    t.start()
+    # 启动 Flask
+    app.run(host="0.0.0.0", port=8080)

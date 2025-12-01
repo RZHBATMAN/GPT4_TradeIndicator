@@ -571,8 +571,8 @@ def homepage():
             
             <div class="strategy-box">
                 <h3>🎯 Strategy Overview</h3>
-                <p><strong>Entry:</strong> 1:30-4:00 PM ET (afternoon positioning)</p>
-                <p><strong>Product:</strong> SPX Iron Condor (0-1 DTE)</p>
+                <p><strong>Entry:</strong> 2:30-3:30 PM ET (afternoon positioning)</p>
+                <p><strong>Product:</strong> SPX Iron Condor (1 DTE)</p>
                 <p><strong>Hold:</strong> Overnight</p>
                 <p><strong>Exit:</strong> Next morning at 15% profit target</p>
                 <p><strong>Edge:</strong> Capture overnight risk premium decay + IV crush</p>

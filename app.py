@@ -743,21 +743,107 @@ def option_alpha_trigger():
 
 
 def poke_self():
-    """Background thread to check trading decision every 30 mins during entry window"""
+    """
+    Background thread for smart trade checking:
+    - Waits for Flask to be ready (with health check)
+    - Checks immediately after ready (if in window)
+    - Then aligns to 30-minute intervals: 2:30, 3:00, 3:30 PM ET
+    """
     port = os.environ.get("PORT", "8080")
-    print(f"[POKE THREAD] Started - will check every 30 minutes during Mon-Fri 2:30-3:30 PM ET")
+    
+    # Wait for Flask to be ready with health checks
+    print(f"[POKE THREAD] Started - waiting for Flask to be ready...")
+    max_wait = 30  # Maximum 30 seconds
+    wait_interval = 2  # Check every 2 seconds
+    elapsed = 0
+    
+    while elapsed < max_wait:
+        try:
+            # Try to hit health endpoint
+            health_url = f"http://127.0.0.1:{port}/health"
+            response = requests.get(health_url, timeout=2)
+            if response.status_code == 200:
+                print(f"[POKE THREAD] ✓ Flask is ready (health check passed after {elapsed}s)")
+                break
+        except:
+            # Flask not ready yet
+            pass
+        
+        time.sleep(wait_interval)
+        elapsed += wait_interval
+    
+    if elapsed >= max_wait:
+        print(f"[POKE THREAD] ⚠ Flask health check timeout after {max_wait}s, proceeding anyway...")
+    
+    print(f"[POKE THREAD] Will check immediately, then at 2:30, 3:00, 3:30 PM ET on Mon-Fri")
+    
+    first_check = True  # Flag for immediate first check
     
     while True:
         now = datetime.now(TRADING_TIMEZONE)
         timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
         
-        # Only check on weekdays
-        if now.weekday() < 5:
+        # First check: immediate (no sleep)
+        if first_check:
+            print(f"[{timestamp}] First check - executing immediately...")
+            first_check = False
+            # Don't sleep, proceed to check below
+        else:
+            # Subsequent checks: calculate smart sleep to next target time
+            current_minute = now.hour * 60 + now.minute
+            
+            # Target minutes: 2:30 PM (870), 3:00 PM (900), 3:30 PM (930)
+            target_minutes = [870, 900, 930]
+            
+            # Find next target
+            next_target = None
+            for target in target_minutes:
+                if current_minute < target - 1:  # -1 to ensure we don't miss it
+                    next_target = target
+                    break
+            
+            # Calculate next check time
+            if next_target is None:
+                # No target today, next is tomorrow at 2:30 PM
+                tomorrow = now + timedelta(days=1)
+                next_check_time = datetime.combine(
+                    tomorrow.date(), 
+                    dt_time(hour=14, minute=30),
+                    tzinfo=TRADING_TIMEZONE
+                )
+            else:
+                # Next target today
+                target_hour = next_target // 60
+                target_minute = next_target % 60
+                next_check_time = datetime.combine(
+                    now.date(),
+                    dt_time(hour=target_hour, minute=target_minute),
+                    tzinfo=TRADING_TIMEZONE
+                )
+            
+            # Calculate sleep duration
+            sleep_seconds = (next_check_time - now).total_seconds()
+            
+            # Add 5 second buffer to ensure we wake after target
+            sleep_seconds = max(sleep_seconds + 5, 60)  # Minimum 60 seconds
+            
+            next_check_str = next_check_time.strftime("%I:%M:%S %p")
+            print(f"[{timestamp}] Sleeping {int(sleep_seconds)}s until next check at {next_check_str}...")
+            time.sleep(sleep_seconds)
+            
+            # Update timestamp after sleep
+            now = datetime.now(TRADING_TIMEZONE)
+            timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+        
+        # Perform the check
+        if now.weekday() < 5:  # Weekday
             current_time = now.time()
+            
             if POKE_WINDOW_START <= current_time <= POKE_WINDOW_END:
+                # Within window - execute check
                 try:
                     url = f"http://127.0.0.1:{port}/option_alpha_trigger"
-                    print(f"[{timestamp}] Checking trade decision at {url}...")
+                    print(f"[{timestamp}] ✓ Within window (2:30-3:30 PM) - Checking trade decision at {url}...")
                     r = requests.get(url, timeout=60)
                     print(f"[{timestamp}] Check completed - Status: {r.status_code}")
                     
@@ -771,14 +857,15 @@ def poke_self():
                 except Exception as e:
                     print(f"[{timestamp}] ERROR checking trade decision: {e}")
             else:
-                print(f"[{timestamp}] Outside check window (2:30-3:30 PM ET), skipping check.")
+                # Outside window
+                current_time_str = now.strftime("%I:%M %p")
+                print(f"[{timestamp}] ✗ Outside window (2:30-3:30 PM ET) - Current: {current_time_str}, skipping check.")
         else:
+            # Weekend
             day_name = now.strftime("%A")
             print(f"[{timestamp}] Weekend ({day_name}), no checks needed.")
-        
-        # Sleep 30 minutes
-        print(f"[{timestamp}] Sleeping for 30 minutes until next check...")
-        time.sleep(POKE_INTERVAL)
+
+
 
 
 if __name__ == "__main__":

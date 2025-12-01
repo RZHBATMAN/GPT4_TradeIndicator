@@ -34,8 +34,8 @@ TRADING_TIMEZONE = ZoneInfo("America/New_York")
 TRADING_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM ET (better news coverage)
 TRADING_WINDOW_END = dt_time(hour=15, minute=30)     # 3:30 PM ET (hard stop)
 
-# Poke settings - check every 30 mins during entry window
-POKE_INTERVAL = 30 * 60  # 30 minutes
+# Poke settings - check every 20 mins during entry window
+POKE_INTERVAL = 20 * 60  # 20 minutes (allows 4 checks: 2:30, 2:50, 3:10, 3:30)
 POKE_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM ET (first check)
 POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET (last check at 3:30)
 
@@ -600,7 +600,7 @@ def homepage():
                 
                 <div class="info-item">
                     <strong>Check Interval</strong>
-                    <span>Every 30 minutes</span>
+                    <span>Every 20 minutes</span>
                 </div>
                 
                 <div class="info-item">
@@ -775,7 +775,7 @@ def poke_self():
     if elapsed >= max_wait:
         print(f"[POKE THREAD] ⚠ Flask health check timeout after {max_wait}s, proceeding anyway...")
     
-    print(f"[POKE THREAD] Will check immediately, then at 2:30, 3:00, 3:30 PM ET on Mon-Fri")
+    print(f"[POKE THREAD] Will check immediately, then at 2:30, 2:50, 3:10, 3:30 PM ET on Mon-Fri")
     
     first_check = True  # Flag for immediate first check
     
@@ -792,8 +792,8 @@ def poke_self():
             # Subsequent checks: calculate smart sleep to next target time
             current_minute = now.hour * 60 + now.minute
             
-            # Target minutes: 2:30 PM (870), 3:00 PM (900), 3:30 PM (930)
-            target_minutes = [870, 900, 930]
+            # Target minutes: 2:30 PM (870), 2:50 PM (890), 3:10 PM (910), 3:30 PM (930)
+            target_minutes = [870, 890, 910, 930]
             
             # Find next target
             next_target = None
@@ -876,8 +876,8 @@ if __name__ == "__main__":
     print("=" * 80)
     print(f"Port: {port}")
     print(f"Entry Window: Mon-Fri 2:30-3:30 PM ET")
-    print(f"Check Interval: Every 30 minutes")
-    print(f"Check Window: Mon-Fri 2:30-3:30 PM ET (checks at 2:30, 3:00, 3:30)")
+    print(f"Check Interval: Every 20 minutes")
+    print(f"Check Window: Mon-Fri 2:30-3:30 PM ET (checks at 2:30, 2:50, 3:10, 3:30)")
     print(f"VIX Threshold: {VIX_THRESHOLD} (above this = auto skip)")
     print("Strategy: Sell overnight premium, capture IV crush")
     print("=" * 80)

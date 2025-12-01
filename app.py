@@ -22,6 +22,8 @@ no_trade_url = os.environ.get("NO_TRADE_URL")
 if not all([OPENAI_API_KEY, NEWS_API_KEY, trade_url, no_trade_url]):
     raise ValueError("Some environment variables are missing.")
 
+# Optional: VIX threshold (you can add VIX_API_KEY later)
+VIX_THRESHOLD = float(os.environ.get("VIX_THRESHOLD", "25.0"))
 
 # API endpoints
 API_URL = "https://api.openai.com/v1/chat/completions"
@@ -29,13 +31,13 @@ NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
 TRADING_TIMEZONE = ZoneInfo("America/New_York")
 
 # Trading window - matches your Option Alpha scanner (1:30-4:00 PM)
-TRADING_WINDOW_START = dt_time(hour=13, minute=30)  # 1:30 PM ET
-TRADING_WINDOW_END = dt_time(hour=16, minute=0)     # 4:00 PM ET
+TRADING_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM ET (better news coverage)
+TRADING_WINDOW_END = dt_time(hour=15, minute=30)     # 3:30 PM ET (hard stop)
 
 # Poke settings - check every 30 mins during entry window
 POKE_INTERVAL = 30 * 60  # 30 minutes
-POKE_WINDOW_START = dt_time(hour=13, minute=30)  # 1:30 PM ET
-POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET (last check before close)
+POKE_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM ET (first check)
+POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET (last check at 3:30)
 
 
 def fetch_breaking_news():
@@ -593,7 +595,7 @@ def homepage():
                 
                 <div class="info-item">
                     <strong>Entry Window</strong>
-                    <span>Mon-Fri, 1:30-4:00 PM ET</span>
+                    <span>Mon-Fri, 2:30-3:30 PM ET</span>
                 </div>
                 
                 <div class="info-item">
@@ -644,7 +646,7 @@ def health_check():
         "status": "healthy",
         "timestamp": timestamp,
         "entry_window_active": in_window,
-        "entry_window": "Mon-Fri 1:30-4:00 PM ET",
+        "entry_window": "Mon-Fri 2:30-3:30 PM ET",
         "strategy": "SPX overnight iron condor"
     }), 200
 
@@ -663,12 +665,24 @@ def option_alpha_trigger():
     try:
         # Check if within trading window
         if not is_within_trading_window(now):
-            message = f"Outside entry window (Mon-Fri 1:30-4:00 PM ET); request rejected"
+            current_time_str = now.strftime("%I:%M %p")
+            day_name = now.strftime("%A")
+            is_weekend = now.weekday() >= 5
+            
+            if is_weekend:
+                reason = f"Weekend ({day_name}) - Our strategy only trades Mon-Fri"
+            else:
+                reason = f"Outside our desired trading window (2:30-3:30 PM ET). Current time: {current_time_str}"
+            
+            message = f"Request not processed. {reason}"
             print(f"[{timestamp}] {message}")
             return jsonify({
-                "status": "rejected",
+                "status": "outside_window",
                 "message": message,
-                "current_time": timestamp
+                "reason": "outside_desired_window" if not is_weekend else "weekend",
+                "our_trading_window": "Mon-Fri 2:30-3:30 PM ET",
+                "current_time": timestamp,
+                "note": "Market may be open, but we only enter positions during our specific window"
             }), 200
         
         print(f"[{timestamp}] Within entry window - analyzing overnight risk...")
@@ -731,7 +745,7 @@ def option_alpha_trigger():
 def poke_self():
     """Background thread to check trading decision every 30 mins during entry window"""
     port = os.environ.get("PORT", "8080")
-    print(f"[POKE THREAD] Started - will check every 30 minutes during Mon-Fri 1:30-3:30 PM ET")
+    print(f"[POKE THREAD] Started - will check every 30 minutes during Mon-Fri 2:30-3:30 PM ET")
     
     while True:
         now = datetime.now(TRADING_TIMEZONE)
@@ -757,7 +771,7 @@ def poke_self():
                 except Exception as e:
                     print(f"[{timestamp}] ERROR checking trade decision: {e}")
             else:
-                print(f"[{timestamp}] Outside check window (1:30-3:30 PM ET), skipping check.")
+                print(f"[{timestamp}] Outside check window (2:30-3:30 PM ET), skipping check.")
         else:
             day_name = now.strftime("%A")
             print(f"[{timestamp}] Weekend ({day_name}), no checks needed.")
@@ -774,9 +788,10 @@ if __name__ == "__main__":
     print("SPX Overnight Iron Condor Strategy Bot")
     print("=" * 80)
     print(f"Port: {port}")
-    print(f"Entry Window: Mon-Fri 1:30-4:00 PM ET")
+    print(f"Entry Window: Mon-Fri 2:30-3:30 PM ET")
     print(f"Check Interval: Every 30 minutes")
-    print(f"Check Window: Mon-Fri 1:30-3:30 PM ET")
+    print(f"Check Window: Mon-Fri 2:30-3:30 PM ET (checks at 2:30, 3:00, 3:30)")
+    print(f"VIX Threshold: {VIX_THRESHOLD} (above this = auto skip)")
     print("Strategy: Sell overnight premium, capture IV crush")
     print("=" * 80)
     

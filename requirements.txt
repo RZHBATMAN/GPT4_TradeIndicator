@@ -4,5 +4,4 @@ yfinance==0.2.33
 pytz==2023.3
 feedparser==6.0.11
 python-dateutil==2.8.2
-
-
+legacycgi==2.6

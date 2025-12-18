@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-SPX Overnight Vol Premium Bot - Triple-Layer Filtering (RAILWAY VERSION)
-Process: Algo Dedup → Keyword Filter → GPT (Dedup Safety + Comment Filter + Risk Analysis)
+SPX Overnight Vol Premium Bot - Railway Production (No feedparser)
+Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
+Uses direct HTTP + XML parsing instead of feedparser
 """
 
 from flask import Flask, jsonify
@@ -14,19 +15,19 @@ import yfinance as yf
 import os
 import threading
 import time as time_module
-import feedparser
 from dateutil import parser as date_parser
 import re
 from difflib import SequenceMatcher
+import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 
-# Configuration - RAILWAY VERSION (uses environment variables)
-ET = pytz.timezone('US/Eastern')
+# Configuration - RAILWAY VERSION
+ET_TZ = pytz.timezone('US/Eastern')
 
 # Trading windows - PRODUCTION: 2:30-3:30 PM ET
-TRADING_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM
-TRADING_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM
+TRADING_WINDOW_START = dt_time(hour=14, minute=30)
+TRADING_WINDOW_END = dt_time(hour=15, minute=30)
 
 def load_config():
     """Load configuration from environment variables (Railway)"""
@@ -38,7 +39,6 @@ def load_config():
         'NO_TRADE_URL': os.environ.get('NO_TRADE_URL')
     }
     
-    # Validate required keys
     missing = [k for k, v in config.items() if not v]
     if missing:
         raise ValueError(f"Missing environment variables: {', '.join(missing)}")
@@ -46,11 +46,8 @@ def load_config():
     return config
 
 CONFIG = load_config()
-
-# API Keys
 OPENAI_API_KEY = CONFIG.get('OPENAI_API_KEY')
 
-# Webhooks
 WEBHOOK_URLS = {
     'TRADE_AGGRESSIVE': CONFIG.get('TRADE_AGGRESSIVE_URL'),
     'TRADE_NORMAL': CONFIG.get('TRADE_NORMAL_URL'),
@@ -65,15 +62,14 @@ WEBHOOK_URLS = {
 def normalize_title(title):
     """Normalize title for comparison"""
     normalized = title.lower()
-    normalized = re.sub(r'[^\w\s]', '', normalized)  # Remove punctuation
-    normalized = ' '.join(normalized.split())  # Normalize whitespace
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+    normalized = ' '.join(normalized.split())
     return normalized
 
 def titles_are_similar(title1, title2, threshold=0.85):
     """Check if two titles are 85%+ similar"""
     norm1 = normalize_title(title1)
     norm2 = normalize_title(title2)
-    
     similarity = SequenceMatcher(None, norm1, norm2).ratio()
     return similarity >= threshold
 
@@ -82,11 +78,9 @@ def deduplicate_articles_smart(articles):
     LAYER 1: Algorithmic deduplication with fuzzy matching
     Keeps the BEST version (most recent + best source priority)
     """
-    
     if not articles:
         return []
     
-    # Source priority (lower = better)
     source_priority = {
         'Reuters': 1,
         'Bloomberg': 2,
@@ -104,7 +98,6 @@ def deduplicate_articles_smart(articles):
                 return source_priority[key]
         return source_priority['Other']
     
-    # Sort: Most recent first, then by source priority
     articles_sorted = sorted(
         articles,
         key=lambda x: (
@@ -120,11 +113,9 @@ def deduplicate_articles_smart(articles):
         title = article['title']
         norm_title = normalize_title(title)
         
-        # Check exact normalized match
         if norm_title in seen_normalized:
             continue
         
-        # Check fuzzy match against all seen titles
         is_duplicate = False
         for seen_norm, seen_data in seen_normalized.items():
             if titles_are_similar(title, seen_data['original']):
@@ -146,7 +137,6 @@ def deduplicate_articles_smart(articles):
 
 def is_obvious_junk(title, description=""):
     """LAYER 2: Lenient keyword filter - only remove OBVIOUS junk"""
-    
     obvious_junk_patterns = [
         r'secret to', r'trick to', r'\d+ ways to', r'you won\'t believe',
         r'shocking', r'amazing', r'incredible',
@@ -156,7 +146,6 @@ def is_obvious_junk(title, description=""):
     
     content = (title + " " + description).lower()
     is_junk = any(re.search(pattern, content) for pattern in obvious_junk_patterns)
-    
     return is_junk
 
 def classify_priority(title, description=""):
@@ -179,16 +168,12 @@ def classify_priority(title, description=""):
     
     content = (title + " " + description).lower()
     is_high_priority = any(re.search(pattern, content) for pattern in high_priority_patterns)
-    
     return 'HIGH' if is_high_priority else 'NORMAL'
 
 def filter_news_lenient(articles, verbose=False):
-    """LAYER 2: Lenient keyword filter (verbose=False for Railway)"""
+    """LAYER 2: Lenient keyword filter"""
     filtered = []
-    stats = {
-        'filtered_junk': 0,
-        'kept': 0
-    }
+    stats = {'filtered_junk': 0, 'kept': 0}
     
     for article in articles:
         title = article.get('title', '')
@@ -200,17 +185,84 @@ def filter_news_lenient(articles, verbose=False):
         
         article['priority'] = classify_priority(title, description)
         stats['kept'] += 1
-        
         filtered.append(article)
     
     return filtered, stats
 
 # ============================================================================
-# NEWS FETCHING - Multi-source (ALL FREE)
+# NEWS FETCHING - NO FEEDPARSER (Direct HTTP + XML)
 # ============================================================================
 
+def parse_rss_feed(url, source_name):
+    """
+    Parse RSS feed using direct HTTP + XML parsing
+    NO FEEDPARSER DEPENDENCY - Works on any Python version
+    """
+    try:
+        response = requests.get(
+            url, 
+            timeout=15, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        response.raise_for_status()
+        
+        # Parse XML
+        root = ET.fromstring(response.content)
+        articles = []
+        now = datetime.now(ET_TZ)
+        
+        # Find all <item> elements in RSS feed
+        for item in root.findall('.//item'):
+            try:
+                # Extract title
+                title_elem = item.find('title')
+                title = title_elem.text if title_elem is not None and title_elem.text else 'No title'
+                
+                # Extract link
+                link_elem = item.find('link')
+                link = link_elem.text if link_elem is not None and link_elem.text else ''
+                
+                # Extract description
+                description_elem = item.find('description')
+                description = description_elem.text if description_elem is not None and description_elem.text else ''
+                
+                # Extract and parse publication date
+                pubdate_elem = item.find('pubDate')
+                if pubdate_elem is not None and pubdate_elem.text:
+                    try:
+                        pub_time = date_parser.parse(pubdate_elem.text)
+                        if pub_time.tzinfo is None:
+                            pub_time = ET_TZ.localize(pub_time)
+                        else:
+                            pub_time = pub_time.astimezone(ET_TZ)
+                    except:
+                        pub_time = now
+                else:
+                    pub_time = now
+                
+                hours_ago = (now - pub_time).total_seconds() / 3600
+                
+                articles.append({
+                    'title': title,
+                    'published_time': pub_time,
+                    'hours_ago': hours_ago,
+                    'source': source_name,
+                    'description': description,
+                    'link': link
+                })
+                
+            except Exception as e:
+                print(f"Error parsing item from {source_name}: {e}")
+                continue
+        
+        return articles
+        
+    except Exception as e:
+        print(f"Error fetching {source_name}: {e}")
+        return []
+
 def fetch_yahoo_finance_news():
-    """Source 1: Yahoo Finance RSS (FREE)"""
+    """Source 1: Yahoo Finance RSS (using direct HTTP)"""
     try:
         rss_feeds = [
             ('https://finance.yahoo.com/news/rssindex', 'Yahoo Finance - Market'),
@@ -224,46 +276,19 @@ def fetch_yahoo_finance_news():
             ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=META&region=US&lang=en-US', 'Yahoo Finance - Meta'),
         ]
         
-        articles = []
-        now = datetime.now(ET)
-        
+        all_articles = []
         for feed_url, feed_name in rss_feeds:
-            try:
-                feed = feedparser.parse(feed_url)
-                for entry in feed.entries:
-                    try:
-                        if hasattr(entry, 'published'):
-                            pub_time = date_parser.parse(entry.published)
-                            if pub_time.tzinfo is None:
-                                pub_time = ET.localize(pub_time)
-                            else:
-                                pub_time = pub_time.astimezone(ET)
-                        else:
-                            pub_time = now
-                    except:
-                        pub_time = now
-                    
-                    hours_ago = (now - pub_time).total_seconds() / 3600
-                    
-                    articles.append({
-                        'title': entry.title if hasattr(entry, 'title') else 'No title',
-                        'published_time': pub_time,
-                        'hours_ago': hours_ago,
-                        'source': feed_name,
-                        'description': entry.summary if hasattr(entry, 'summary') else '',
-                        'link': entry.link if hasattr(entry, 'link') else ''
-                    })
-            except Exception as e:
-                print(f"Error fetching {feed_name}: {e}")
+            articles = parse_rss_feed(feed_url, feed_name)
+            all_articles.extend(articles)
         
-        return articles
+        return all_articles
         
     except Exception as e:
         print(f"ERROR in Yahoo Finance: {e}")
         return []
 
 def fetch_google_news_rss():
-    """Source 2: Google News RSS (FREE, NO API KEY)"""
+    """Source 2: Google News RSS (using direct HTTP)"""
     try:
         queries = [
             'stock+market+OR+S%26P+500',
@@ -273,48 +298,23 @@ def fetch_google_news_rss():
             'Federal+Reserve+OR+inflation'
         ]
         
-        articles = []
-        now = datetime.now(ET)
-        
+        all_articles = []
         for query in queries:
-            try:
-                url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-                feed = feedparser.parse(url)
-                
-                for entry in feed.entries:
-                    try:
-                        if hasattr(entry, 'published'):
-                            pub_time = date_parser.parse(entry.published)
-                            if pub_time.tzinfo is None:
-                                pub_time = ET.localize(pub_time)
-                            else:
-                                pub_time = pub_time.astimezone(ET)
-                        else:
-                            pub_time = now
-                    except:
-                        pub_time = now
-                    
-                    hours_ago = (now - pub_time).total_seconds() / 3600
-                    
-                    articles.append({
-                        'title': entry.title if hasattr(entry, 'title') else 'No title',
-                        'published_time': pub_time,
-                        'hours_ago': hours_ago,
-                        'source': 'Google News',
-                        'description': entry.summary if hasattr(entry, 'summary') else '',
-                        'link': entry.link if hasattr(entry, 'link') else ''
-                    })
-            except Exception as e:
-                print(f"Error with query {query}: {e}")
+            url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+            articles = parse_rss_feed(url, 'Google News')
+            all_articles.extend(articles)
         
-        return articles
+        return all_articles
         
     except Exception as e:
         print(f"ERROR in Google News: {e}")
         return []
 
 def fetch_news_multi_source():
-    """Triple-layer news processing (Railway version - less verbose)"""
+    """
+    Triple-layer news processing:
+    Layer 1: Algo dedup → Layer 2: Keyword filter → Layer 3: GPT (sent below)
+    """
     try:
         all_articles = []
         
@@ -572,7 +572,12 @@ def analyze_market_trend(spx_data):
 # ============================================================================
 
 def analyze_gpt_news(news_data):
-    """LAYER 3: GPT Triple-Duty Analysis"""
+    """
+    LAYER 3: GPT Triple-Duty Analysis
+    1. Duplication safety net (if algo missed any)
+    2. Filter commentary/old news
+    3. Analyze overnight risk
+    """
     
     if news_data['count'] == 0:
         return {
@@ -585,7 +590,7 @@ def analyze_gpt_news(news_data):
             'duplicates_found': 'None'
         }
     
-    now = datetime.now(ET)
+    now = datetime.now(ET_TZ)
     current_time_str = now.strftime("%I:%M %p ET")
     
     prompt = f"""You are an expert overnight volatility risk analyst for SPX iron condor positions.
@@ -835,7 +840,7 @@ def generate_signal(composite_score):
 def send_webhook(signal_data):
     """Send webhook to Option Alpha"""
     signal = signal_data['signal']
-    timestamp = datetime.now(ET).isoformat()
+    timestamp = datetime.now(ET_TZ).isoformat()
     
     if signal == "SKIP":
         url = WEBHOOK_URLS.get('NO_TRADE')
@@ -862,8 +867,7 @@ def send_webhook(signal_data):
 def is_within_trading_window(now=None):
     """PRODUCTION: Check if within 2:30-3:30 PM ET trading window"""
     if now is None:
-        now = datetime.now(ET)
-    
+        now = datetime.now(ET_TZ)
     current_time = now.time()
     return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
 
@@ -874,7 +878,7 @@ def is_within_trading_window(now=None):
 @app.route("/", methods=["GET"])
 def homepage():
     """Homepage"""
-    now = datetime.now(ET)
+    now = datetime.now(ET_TZ)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     
     html = f"""
@@ -1047,11 +1051,11 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">Environment:</span>
-                    <span class="info-value">Railway (Production)</span>
+                    <span class="info-value">Railway Production</span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">News Sources:</span>
-                    <span class="info-value">Yahoo Finance RSS + Google News RSS (FREE)</span>
+                    <span class="info-label">News Parsing:</span>
+                    <span class="info-value">Direct HTTP + XML (No feedparser dependency)</span>
                 </div>
             </div>
             
@@ -1069,19 +1073,20 @@ def homepage():
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check"""
-    now = datetime.now(ET)
+    now = datetime.now(ET_TZ)
     return jsonify({
         "status": "healthy",
         "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
         "environment": "production",
         "trading_window": "2:30-3:30 PM ET",
-        "filtering": "Triple-layer (Algo dedup → Keyword → GPT)"
+        "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
+        "news_parser": "Direct HTTP + XML (No feedparser)"
     }), 200
 
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
 def option_alpha_trigger():
     """Main trading decision endpoint"""
-    now = datetime.now(ET)
+    now = datetime.now(ET_TZ)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     
     print(f"\n[{timestamp}] /option_alpha_trigger called")
@@ -1161,13 +1166,11 @@ def option_alpha_trigger():
             "timestamp": timestamp,
             "environment": "production",
             
-            # ========== FINAL DECISION ==========
             "decision": signal['signal'],
             "composite_score": composite['score'],
             "category": composite['category'],
             "reason": signal['reason'],
             
-            # ========== MARKET DATA ==========
             "market_data": {
                 "spx_current": spx_data['current'],
                 "spx_high": spx_data['high_today'],
@@ -1175,7 +1178,6 @@ def option_alpha_trigger():
                 "vix_current": vix_data['current']
             },
             
-            # ========== INDICATOR 1: IV/RV RATIO (30%) ==========
             "indicator_1_iv_rv": {
                 "weight": "30%",
                 "score": iv_rv['score'],
@@ -1184,7 +1186,6 @@ def option_alpha_trigger():
                 "implied_vol": f"{iv_rv['implied_vol']}%"
             },
             
-            # ========== INDICATOR 2: MARKET TREND (20%) ==========
             "indicator_2_trend": {
                 "weight": "20%",
                 "score": trend['score'],
@@ -1192,7 +1193,6 @@ def option_alpha_trigger():
                 "intraday_range": f"{trend['intraday_range'] * 100:.2f}%"
             },
             
-            # ========== INDICATOR 3: NEWS + GPT (50%) ==========
             "indicator_3_news_gpt": {
                 "weight": "50%",
                 
@@ -1223,7 +1223,6 @@ def option_alpha_trigger():
                 }
             },
             
-            # ========== WEBHOOK ==========
             "webhook_success": webhook.get('success', False)
             
         }), 200
@@ -1236,24 +1235,23 @@ def option_alpha_trigger():
 
 def poke_self():
     """Background thread: Trigger analysis every 20 minutes during trading hours"""
-    print("[POKE] Background thread started - 20-minute intervals during trading hours")
+    print("[POKE] Background thread started")
     
     while True:
         try:
-            now = datetime.now(ET)
+            now = datetime.now(ET_TZ)
             current_time = now.time()
             
-            # Check if within trading window
             if is_within_trading_window(now):
-                # Check if on 20-minute mark (2:30, 2:50, 3:10, 3:30)
                 if current_time.minute in [30, 50, 10] and current_time.second < 30:
-                    print(f"\n[POKE] Triggering analysis at {now.strftime('%I:%M %p ET')}")
+                    print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
                     try:
+                        # Call self via localhost
                         requests.get("http://localhost:8080/option_alpha_trigger", timeout=60)
                     except Exception as e:
-                        print(f"[POKE] Error triggering: {e}")
+                        print(f"[POKE] Error: {e}")
             
-            time_module.sleep(30)  # Check every 30 seconds
+            time_module.sleep(30)
             
         except Exception as e:
             print(f"[POKE] Background error: {e}")
@@ -1263,11 +1261,11 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     
     print("=" * 80)
-    print("Ren's SPX Vol Signal - Production (Railway)")
+    print("Ren's SPX Vol Signal - Production (Nuclear Version)")
     print("=" * 80)
     print(f"Port: {PORT}")
     print(f"Trading Window: 2:30-3:30 PM ET")
-    print(f"Process: Algo Dedup → Keyword → GPT")
+    print(f"News Parser: Direct HTTP + XML (No feedparser)")
     print("=" * 80)
     
     # Start background thread

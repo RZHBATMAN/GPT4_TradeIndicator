@@ -1,891 +1,1277 @@
+#!/usr/bin/env python3
+"""
+SPX Overnight Vol Premium Bot - Triple-Layer Filtering (RAILWAY VERSION)
+Process: Algo Dedup → Keyword Filter → GPT (Dedup Safety + Comment Filter + Risk Analysis)
+"""
+
 from flask import Flask, jsonify
-import requests
-import os
 import json
+import math
+import requests
+from datetime import datetime, timedelta, time as dt_time
+import pytz
+import yfinance as yf
+import os
 import threading
-import time
-from datetime import datetime, time as dt_time, timedelta
-try:
-    from zoneinfo import ZoneInfo  # type: ignore
-except ImportError:
-    from pytz import timezone as ZoneInfo  # type: ignore
+import time as time_module
+import feedparser
+from dateutil import parser as date_parser
+import re
+from difflib import SequenceMatcher
 
 app = Flask(__name__)
 
-# Environment variables
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
-trade_url = os.environ.get("TRADE_URL")
-no_trade_url = os.environ.get("NO_TRADE_URL")
+# Configuration - RAILWAY VERSION (uses environment variables)
+ET = pytz.timezone('US/Eastern')
 
-# Check required variables
-if not all([OPENAI_API_KEY, NEWS_API_KEY, trade_url, no_trade_url]):
-    raise ValueError("Some environment variables are missing.")
+# Trading windows - PRODUCTION: 2:30-3:30 PM ET
+TRADING_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM
+TRADING_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM
 
-# Optional: VIX threshold (you can add VIX_API_KEY later)
-VIX_THRESHOLD = float(os.environ.get("VIX_THRESHOLD", "25.0"))
-
-# API endpoints
-API_URL = "https://api.openai.com/v1/chat/completions"
-NEWS_API_URL = "https://newsapi.org/v2/top-headlines"
-TRADING_TIMEZONE = ZoneInfo("America/New_York")
-
-# Trading window - matches your Option Alpha scanner (1:30-4:00 PM)
-TRADING_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM ET (better news coverage)
-TRADING_WINDOW_END = dt_time(hour=15, minute=30)     # 3:30 PM ET (hard stop)
-
-# Poke settings - check every 20 mins during entry window
-POKE_INTERVAL = 20 * 60  # 20 minutes (allows 4 checks: 2:30, 2:50, 3:10, 3:30)
-POKE_WINDOW_START = dt_time(hour=14, minute=30)  # 2:30 PM ET (first check)
-POKE_WINDOW_END = dt_time(hour=15, minute=30)    # 3:30 PM ET (last check at 3:30)
-
-
-def fetch_breaking_news():
-    """
-    Fetches market-relevant news with time-weighted relevance
+def load_config():
+    """Load configuration from environment variables (Railway)"""
+    config = {
+        'OPENAI_API_KEY': os.environ.get('OPENAI_API_KEY'),
+        'TRADE_AGGRESSIVE_URL': os.environ.get('TRADE_AGGRESSIVE_URL'),
+        'TRADE_NORMAL_URL': os.environ.get('TRADE_NORMAL_URL'),
+        'TRADE_CONSERVATIVE_URL': os.environ.get('TRADE_CONSERVATIVE_URL'),
+        'NO_TRADE_URL': os.environ.get('NO_TRADE_URL')
+    }
     
-    Strategy:
-    - Recent news (last 3 hours): Most relevant for overnight risk
-    - US business news: Direct SPX impact
-    - Global market news: Overnight spillover
-    - Geopolitical news: 24/7 shock risk
+    # Validate required keys
+    missing = [k for k, v in config.items() if not v]
+    if missing:
+        raise ValueError(f"Missing environment variables: {', '.join(missing)}")
+    
+    return config
+
+CONFIG = load_config()
+
+# API Keys
+OPENAI_API_KEY = CONFIG.get('OPENAI_API_KEY')
+
+# Webhooks
+WEBHOOK_URLS = {
+    'TRADE_AGGRESSIVE': CONFIG.get('TRADE_AGGRESSIVE_URL'),
+    'TRADE_NORMAL': CONFIG.get('TRADE_NORMAL_URL'),
+    'TRADE_CONSERVATIVE': CONFIG.get('TRADE_CONSERVATIVE_URL'),
+    'NO_TRADE': CONFIG.get('NO_TRADE_URL')
+}
+
+# ============================================================================
+# LAYER 1: ALGO DEDUPLICATION - Strong fuzzy matching
+# ============================================================================
+
+def normalize_title(title):
+    """Normalize title for comparison"""
+    normalized = title.lower()
+    normalized = re.sub(r'[^\w\s]', '', normalized)  # Remove punctuation
+    normalized = ' '.join(normalized.split())  # Normalize whitespace
+    return normalized
+
+def titles_are_similar(title1, title2, threshold=0.85):
+    """Check if two titles are 85%+ similar"""
+    norm1 = normalize_title(title1)
+    norm2 = normalize_title(title2)
+    
+    similarity = SequenceMatcher(None, norm1, norm2).ratio()
+    return similarity >= threshold
+
+def deduplicate_articles_smart(articles):
     """
-    try:
-        # Calculate time window (last 3 hours - optimal for afternoon trading)
-        # Captures: Recent developments without too much already-priced news
-        now = datetime.now(TRADING_TIMEZONE)
-        three_hours_ago = now - timedelta(hours=3)
-        from_time = three_hours_ago.strftime("%Y-%m-%dT%H:%M:%S")
-        
-        all_articles = []
-        
-        # Query 1: US Business/Financial (most relevant)
-        params_business = {
-            'apiKey': NEWS_API_KEY,
-            'language': 'en',
-            'category': 'business',
-            'country': 'us',
-            'sortBy': 'publishedAt',
-            'from': from_time,  # Last 3 hours
-            'pageSize': 10
-        }
-        
-        # Query 2: Market-specific keywords (catches breaking developments)
-        params_market = {
-            'apiKey': NEWS_API_KEY,
-            'language': 'en',
-            'sortBy': 'publishedAt',
-            'from': from_time,  # Last 3 hours
-            'q': 'stock OR market OR fed OR economy OR bank OR "wall street" OR crisis OR volatility',
-            'pageSize': 10
-        }
-        
-        # Query 3: Geopolitical/Global (overnight spillover risk)
-        params_global = {
-            'apiKey': NEWS_API_KEY,
-            'language': 'en',
-            'sortBy': 'publishedAt',
-            'from': from_time,  # Last 3 hours
-            'q': 'geopolitical OR war OR conflict OR central bank OR "global markets"',
-            'pageSize': 5
-        }
-        
-        # Fetch all three categories
-        for params in [params_business, params_market, params_global]:
-            try:
-                response = requests.get(NEWS_API_URL, params=params, timeout=10)
-                if response.status_code == 200:
-                    articles = response.json().get("articles", [])
-                    all_articles.extend(articles)
-            except Exception as e:
-                print(f"Error fetching news category: {e}")
-                continue
-        
-        # Deduplicate by title
-        seen_titles = set()
-        unique_articles = []
-        for article in all_articles:
-            title = article.get('title', '')
-            if title and title not in seen_titles and len(title) > 10:
-                seen_titles.add(title)
-                unique_articles.append(article)
-        
-        # Sort by published time (most recent first)
-        unique_articles.sort(
-            key=lambda x: x.get('publishedAt', ''), 
-            reverse=True
+    LAYER 1: Algorithmic deduplication with fuzzy matching
+    Keeps the BEST version (most recent + best source priority)
+    """
+    
+    if not articles:
+        return []
+    
+    # Source priority (lower = better)
+    source_priority = {
+        'Reuters': 1,
+        'Bloomberg': 2,
+        'Google News': 3,
+        'Yahoo Finance': 4,
+        'CNBC': 5,
+        'MarketWatch': 6,
+        'Other': 99
+    }
+    
+    def get_source_priority(article):
+        source = article.get('source', 'Other')
+        for key in source_priority:
+            if key.lower() in source.lower():
+                return source_priority[key]
+        return source_priority['Other']
+    
+    # Sort: Most recent first, then by source priority
+    articles_sorted = sorted(
+        articles,
+        key=lambda x: (
+            -x['published_time'].timestamp(),
+            get_source_priority(x)
         )
+    )
+    
+    unique = []
+    seen_normalized = {}
+    
+    for article in articles_sorted:
+        title = article['title']
+        norm_title = normalize_title(title)
         
-        # Take top 15 most recent
-        unique_articles = unique_articles[:15]
+        # Check exact normalized match
+        if norm_title in seen_normalized:
+            continue
         
-        if not unique_articles:
-            print("Warning: No recent market news found, using fallback")
-            # Fallback: Get top headlines without time filter
-            params_fallback = {
-                'apiKey': NEWS_API_KEY,
-                'language': 'en',
-                'category': 'business',
-                'country': 'us',
-                'pageSize': 5
+        # Check fuzzy match against all seen titles
+        is_duplicate = False
+        for seen_norm, seen_data in seen_normalized.items():
+            if titles_are_similar(title, seen_data['original']):
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            unique.append(article)
+            seen_normalized[norm_title] = {
+                'original': title,
+                'article': article
             }
-            response = requests.get(NEWS_API_URL, params=params_fallback, timeout=10)
-            if response.status_code == 200:
-                unique_articles = response.json().get("articles", [])[:5]
+    
+    return unique
+
+# ============================================================================
+# LAYER 2: KEYWORD FILTER - Remove obvious junk
+# ============================================================================
+
+def is_obvious_junk(title, description=""):
+    """LAYER 2: Lenient keyword filter - only remove OBVIOUS junk"""
+    
+    obvious_junk_patterns = [
+        r'secret to', r'trick to', r'\d+ ways to', r'you won\'t believe',
+        r'shocking', r'amazing', r'incredible',
+        r'^why you should', r'^how to', r'^what you need to know about investing',
+        r'last week.*recap', r'last month.*review', r'year in review'
+    ]
+    
+    content = (title + " " + description).lower()
+    is_junk = any(re.search(pattern, content) for pattern in obvious_junk_patterns)
+    
+    return is_junk
+
+def classify_priority(title, description=""):
+    """Mark high-priority events"""
+    high_priority_patterns = [
+        r'(beats|misses|reports) earnings',
+        r'earnings (beat|miss)',
+        r'q[1-4] (earnings|results)',
+        r'(raises|cuts|lowers|increases) (guidance|forecast|outlook)',
+        r'stock (sinks|soars|jumps|plunges) \d+%',
+        r'shares (fall|rise|jump) \d+%',
+        r'(up|down) (1[0-9]|[2-9][0-9])%',
+        r'(apple|microsoft|google|alphabet|amazon|nvidia|tesla|meta).*'
+        r'(upgrade|downgrade|price target)',
+        r'announces (acquisition|merger|layoffs|ceo)',
+        r'completes (acquisition|merger)',
+        r'sec (approves|rejects|investigates)',
+        r'fda (approves|rejects)',
+    ]
+    
+    content = (title + " " + description).lower()
+    is_high_priority = any(re.search(pattern, content) for pattern in high_priority_patterns)
+    
+    return 'HIGH' if is_high_priority else 'NORMAL'
+
+def filter_news_lenient(articles, verbose=False):
+    """LAYER 2: Lenient keyword filter (verbose=False for Railway)"""
+    filtered = []
+    stats = {
+        'filtered_junk': 0,
+        'kept': 0
+    }
+    
+    for article in articles:
+        title = article.get('title', '')
+        description = article.get('description', '')
         
-        if not unique_articles:
-            return [], "No market news available."
+        if is_obvious_junk(title, description):
+            stats['filtered_junk'] += 1
+            continue
         
-        # Format for GPT
-        news_headlines = [article['title'] for article in unique_articles]
+        article['priority'] = classify_priority(title, description)
+        stats['kept'] += 1
         
-        # Create detailed summary with timestamps
-        news_summary = ""
-        for article in unique_articles:
-            title = article.get('title', 'N/A')
-            description = article.get('description', 'N/A')
-            published = article.get('publishedAt', 'N/A')
-            source = article.get('source', {}).get('name', 'Unknown')
-            
-            # Parse timestamp to show how recent
+        filtered.append(article)
+    
+    return filtered, stats
+
+# ============================================================================
+# NEWS FETCHING - Multi-source (ALL FREE)
+# ============================================================================
+
+def fetch_yahoo_finance_news():
+    """Source 1: Yahoo Finance RSS (FREE)"""
+    try:
+        rss_feeds = [
+            ('https://finance.yahoo.com/news/rssindex', 'Yahoo Finance - Market'),
+            ('https://finance.yahoo.com/rss/headline?s=^GSPC', 'Yahoo Finance - S&P 500'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL&region=US&lang=en-US', 'Yahoo Finance - Apple'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=MSFT&region=US&lang=en-US', 'Yahoo Finance - Microsoft'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=GOOGL&region=US&lang=en-US', 'Yahoo Finance - Google'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=AMZN&region=US&lang=en-US', 'Yahoo Finance - Amazon'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=NVDA&region=US&lang=en-US', 'Yahoo Finance - Nvidia'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=TSLA&region=US&lang=en-US', 'Yahoo Finance - Tesla'),
+            ('https://feeds.finance.yahoo.com/rss/2.0/headline?s=META&region=US&lang=en-US', 'Yahoo Finance - Meta'),
+        ]
+        
+        articles = []
+        now = datetime.now(ET)
+        
+        for feed_url, feed_name in rss_feeds:
             try:
-                pub_time = datetime.fromisoformat(published.replace('Z', '+00:00'))
-                pub_time_et = pub_time.astimezone(TRADING_TIMEZONE)
-                time_str = pub_time_et.strftime("%I:%M %p")
-            except:
-                time_str = "Earlier"
-            
-            news_summary += f"[{time_str}] {source}: {title}\n   {description}\n\n"
+                feed = feedparser.parse(feed_url)
+                for entry in feed.entries:
+                    try:
+                        if hasattr(entry, 'published'):
+                            pub_time = date_parser.parse(entry.published)
+                            if pub_time.tzinfo is None:
+                                pub_time = ET.localize(pub_time)
+                            else:
+                                pub_time = pub_time.astimezone(ET)
+                        else:
+                            pub_time = now
+                    except:
+                        pub_time = now
+                    
+                    hours_ago = (now - pub_time).total_seconds() / 3600
+                    
+                    articles.append({
+                        'title': entry.title if hasattr(entry, 'title') else 'No title',
+                        'published_time': pub_time,
+                        'hours_ago': hours_ago,
+                        'source': feed_name,
+                        'description': entry.summary if hasattr(entry, 'summary') else '',
+                        'link': entry.link if hasattr(entry, 'link') else ''
+                    })
+            except Exception as e:
+                print(f"Error fetching {feed_name}: {e}")
         
-        print(f"Fetched {len(unique_articles)} relevant news items from last 3 hours")
-        return news_headlines, news_summary.strip()
+        return articles
         
     except Exception as e:
-        print(f"Error in fetch_breaking_news: {e}")
-        return [], "Unable to fetch news data."
+        print(f"ERROR in Yahoo Finance: {e}")
+        return []
 
-
-def parse_gpt_response(response_text):
-    """Clean and parse GPT response as JSON"""
+def fetch_google_news_rss():
+    """Source 2: Google News RSS (FREE, NO API KEY)"""
     try:
-        cleaned_response = response_text.replace("```json", "").replace("```", "").strip()
-        print("Cleaned GPT response:", cleaned_response)
-        parsed_response = json.loads(cleaned_response)
-        return parsed_response
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse GPT response as JSON. Response was: {response_text}. Error: {e}")
+        queries = [
+            'stock+market+OR+S%26P+500',
+            'earnings+OR+guidance',
+            'Apple+OR+Microsoft+OR+Google+OR+Amazon',
+            'Nvidia+OR+Tesla+OR+Meta',
+            'Federal+Reserve+OR+inflation'
+        ]
+        
+        articles = []
+        now = datetime.now(ET)
+        
+        for query in queries:
+            try:
+                url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+                feed = feedparser.parse(url)
+                
+                for entry in feed.entries:
+                    try:
+                        if hasattr(entry, 'published'):
+                            pub_time = date_parser.parse(entry.published)
+                            if pub_time.tzinfo is None:
+                                pub_time = ET.localize(pub_time)
+                            else:
+                                pub_time = pub_time.astimezone(ET)
+                        else:
+                            pub_time = now
+                    except:
+                        pub_time = now
+                    
+                    hours_ago = (now - pub_time).total_seconds() / 3600
+                    
+                    articles.append({
+                        'title': entry.title if hasattr(entry, 'title') else 'No title',
+                        'published_time': pub_time,
+                        'hours_ago': hours_ago,
+                        'source': 'Google News',
+                        'description': entry.summary if hasattr(entry, 'summary') else '',
+                        'link': entry.link if hasattr(entry, 'link') else ''
+                    })
+            except Exception as e:
+                print(f"Error with query {query}: {e}")
+        
+        return articles
+        
+    except Exception as e:
+        print(f"ERROR in Google News: {e}")
+        return []
+
+def fetch_news_multi_source():
+    """Triple-layer news processing (Railway version - less verbose)"""
+    try:
+        all_articles = []
+        
+        # Fetch from all sources
+        yahoo_articles = fetch_yahoo_finance_news()
+        google_articles = fetch_google_news_rss()
+        
+        all_articles.extend(yahoo_articles)
+        all_articles.extend(google_articles)
+        
+        raw_count = len(all_articles)
+        
+        if not all_articles:
+            return {
+                'count': 0,
+                'summary': 'No news available.',
+                'articles': [],
+                'filter_stats': {
+                    'raw_articles': 0,
+                    'duplicates_removed': 0,
+                    'unique_articles': 0,
+                    'junk_filtered': 0,
+                    'sent_to_gpt': 0
+                }
+            }
+        
+        # LAYER 1: Strong deduplication
+        unique_articles = deduplicate_articles_smart(all_articles)
+        duplicates_removed = raw_count - len(unique_articles)
+        
+        # LAYER 2: Keyword filter
+        filtered_articles, filter_stats = filter_news_lenient(unique_articles, verbose=False)
+        
+        if not filtered_articles:
+            return {
+                'count': 0,
+                'summary': 'No actionable news after filtering.',
+                'articles': [],
+                'filter_stats': {
+                    'raw_articles': raw_count,
+                    'duplicates_removed': duplicates_removed,
+                    'unique_articles': len(unique_articles),
+                    'junk_filtered': filter_stats['filtered_junk'],
+                    'sent_to_gpt': 0
+                }
+            }
+        
+        # Sort by time (most recent first)
+        filtered_articles.sort(key=lambda x: x['published_time'], reverse=True)
+        
+        # Format for GPT (Layer 3)
+        news_summary = ""
+        for article in filtered_articles[:30]:
+            time_str = article['published_time'].strftime("%I:%M %p")
+            hours_ago = article['hours_ago']
+            
+            if hours_ago < 1:
+                recency = "⚠️ VERY RECENT"
+            elif hours_ago < 3:
+                recency = "🔸 RECENT"
+            elif hours_ago < 6:
+                recency = "• Somewhat recent"
+            else:
+                recency = "• Earlier today"
+            
+            priority = article.get('priority', 'NORMAL')
+            priority_marker = "🔥" if priority == 'HIGH' else ""
+            
+            news_summary += f"[{time_str}] {recency} {priority_marker} ({article['source']})\n"
+            news_summary += f"   {article['title']}\n"
+            if article['description']:
+                desc = article['description'][:150]
+                news_summary += f"   {desc}...\n"
+            news_summary += "\n"
+        
         return {
-            "overnight_risk_score": 5,
-            "recommendation": "REDUCE_SIZE",
-            "reasoning": "Unable to parse GPT response due to formatting issues."
+            'count': len(filtered_articles),
+            'summary': news_summary.strip(),
+            'articles': filtered_articles[:30],
+            'filter_stats': {
+                'raw_articles': raw_count,
+                'duplicates_removed': duplicates_removed,
+                'unique_articles': len(unique_articles),
+                'junk_filtered': filter_stats['filtered_junk'],
+                'sent_to_gpt': filter_stats['kept']
+            }
+        }
+        
+    except Exception as e:
+        print(f"CRITICAL ERROR in fetch_news_multi_source: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'count': 0,
+            'summary': f'News fetch failed: {str(e)}',
+            'articles': [],
+            'filter_stats': {
+                'raw_articles': 0,
+                'duplicates_removed': 0,
+                'unique_articles': 0,
+                'junk_filtered': 0,
+                'sent_to_gpt': 0
+            }
         }
 
+# ============================================================================
+# DATA FETCHING
+# ============================================================================
 
-def ask_gpt(prompt):
-    """Send prompt to GPT-4 and get response"""
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    data = {
-        "model": "gpt-4-turbo",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
-        "temperature": 0.3,  # Lower temperature for more consistent analysis
-    }
-    response = requests.post(API_URL, headers=headers, json=data)
+def get_spx_data():
+    """Fetch SPX data from Yahoo Finance"""
+    try:
+        spx = yf.Ticker("^GSPC")
+        today_data = spx.history(period="1d")
+        current_price = today_data['Close'].iloc[-1]
+        high_today = today_data['High'].iloc[-1]
+        low_today = today_data['Low'].iloc[-1]
+        history = spx.history(period="15d")
+        closes = history['Close'].values
+        
+        return {
+            'current': float(current_price),
+            'high_today': float(high_today),
+            'low_today': float(low_today),
+            'history_closes': [float(x) for x in closes]
+        }
+    except Exception as e:
+        print(f"Error fetching SPX: {e}")
+        return None
+
+def get_vix_data():
+    """Fetch VIX data"""
+    try:
+        vix = yf.Ticker("^VIX")
+        today_data = vix.history(period="1d")
+        current_vix = today_data['Close'].iloc[-1]
+        return {'current': float(current_vix)}
+    except Exception as e:
+        print(f"Error fetching VIX: {e}")
+        return None
+
+# ============================================================================
+# INDICATOR 1: IV/RV RATIO (30%)
+# ============================================================================
+
+def analyze_iv_rv_ratio(spx_data, vix_data):
+    """Analyze Implied Vol vs Realized Vol"""
+    closes = spx_data['history_closes'][-11:]
     
-    if response.status_code != 200:
-        raise Exception(f"OpenAI API request failed: {response.text}")
+    returns = []
+    for i in range(1, len(closes)):
+        daily_return = math.log(closes[i] / closes[i-1])
+        returns.append(daily_return)
     
-    result_text = response.json()["choices"][0]["message"]["content"].strip()
-    return parse_gpt_response(result_text)
-
-
-def analyze_overnight_risk(news_summary):
-    """
-    GPT as PREDICTION MODEL: Forward-looking overnight escalation risk
-    Focus: Will recent developments lead to overnight gaps + IV spikes?
-    """
-    current_time = datetime.now(TRADING_TIMEZONE).strftime("%A, %B %d, %Y %I:%M %p %Z")
+    mean_return = sum(returns) / len(returns)
+    squared_diffs = [(r - mean_return)**2 for r in returns]
+    variance = sum(squared_diffs) / (len(returns) - 1)
+    daily_std = math.sqrt(variance)
+    realized_vol = daily_std * math.sqrt(252) * 100
     
-    prompt = f"""You are a PREDICTIVE risk model for overnight SPX options exposure.
-
-CURRENT TIME: {current_time}
-
-MY POSITION:
-- Selling SPX iron condor NOW (late afternoon entry)
-- Holding position OVERNIGHT (~16 hours)
-- Exiting tomorrow morning at target
-
-MY DUAL RISKS (occur together):
-1. Price Gap Risk: SPX gaps ±1-2% overnight → strikes breached
-2. IV Spike Risk: VIX/IV jumps overnight → expensive to exit
-→ Same shock events trigger BOTH simultaneously
-
-ALREADY FILTERED (by my system):
-✓ Scheduled FOMC, CPI, NFP, GDP releases
-✓ Known earnings (mega-caps after hours)
-✓ Pre-announced Fed speeches
-
-YOUR PREDICTION TASK:
-Based on recent news, predict: "Will there be an UNEXPECTED shock overnight that causes BOTH price gaps AND IV spikes?"
-
-RECENT NEWS (last 3 hours, time-stamped):
-{news_summary}
-
-PREDICTION FRAMEWORK - Ask these questions:
-
-1. ESCALATION POTENTIAL:
-   - Are any situations ACTIVELY DEVELOPING right now?
-   - Could they get WORSE between now and tomorrow morning?
-   - Is this the START of something bigger or RESOLUTION of something?
-
-2. TIMING RISK:
-   - Did critical news just break in last 1-2 hours?
-   - Is there INSUFFICIENT market reaction time before close?
-   - Could after-hours/overnight bring NEW developments?
-
-3. CONTAGION RISK:
-   - Is this ISOLATED or could it SPREAD?
-   - Are there SYSTEMIC implications?
-   - Could one problem trigger others overnight?
-
-4. SURPRISE FACTOR:
-   - Was this EXPECTED or UNEXPECTED?
-   - Is the market COMPLACENT about this risk?
-   - Could morning bring SHOCKING updates?
-
-THREAT CATEGORIES (Unscheduled shocks only):
-
-🚨 GEOPOLITICAL ESCALATION:
-- Wars/conflicts suddenly intensifying
-- Major attacks or military action
-- Regime changes, coups
-- Trade war surprise escalations
-
-🏦 FINANCIAL CONTAGION:
-- Bank failures or liquidity crises
-- Credit market freezes
-- Major bankruptcy filings (systemic)
-- Margin calls / forced liquidations
-
-⚡ POLICY SHOCKS:
-- Emergency Fed actions (unscheduled)
-- Surprise regulatory moves
-- Major policy U-turns
-- Government shutdowns / debt ceiling
-
-📰 BREAKING CRISES:
-- Major corporate frauds revealed
-- Cyber attacks on financial systems
-- Natural disasters (major economic impact)
-- Pandemic developments
-
-PREDICTION SCALE (1-10):
-
-1-3: VERY LOW OVERNIGHT RISK → TRADE
-→ Normal stable news flow
-→ No developing crises
-→ Market has digested all information
-→ Expected: Quiet overnight, normal theta/IV decay
-→ Prediction: 95%+ chance of calm overnight
-
-4-6: MODERATE RISK → TRADE (with caution)
-→ Some developments but manageable
-→ Market awareness is adequate
-→ Low probability of major shock
-→ Expected: Likely calm, possible minor movement
-→ Prediction: 80-90% chance of manageable overnight
-
-7-8: HIGH RISK → SKIP
-→ Active crisis unfolding RIGHT NOW
-→ High probability of overnight deterioration
-→ Market showing stress signals
-→ Expected: Likely gap and/or IV spike
-→ Prediction: 40-60% chance of significant shock
-
-9-10: EXTREME RISK → SKIP
-→ Major crisis in full swing
-→ Very high certainty of overnight chaos
-→ Systemic implications clear
-→ Expected: Almost certain gap + IV explosion
-→ Prediction: 70%+ chance of major overnight shock
-
-DECISION THRESHOLD:
-• Scores 1-6: TRADE (overnight risk acceptable)
-• Scores 7-10: SKIP (overnight risk too high)
-
-RESPOND IN JSON (no markdown, no backticks):
-{{
-  "developing_threats": "List specific situations that could ESCALATE overnight, or 'None - stable conditions'",
-  "late_breaking_news": "Any news from last 1-2 hours that market hasn't fully absorbed? Or 'None'",
-  "overnight_escalation_probability": "Low/Moderate/High - likelihood things get WORSE overnight",
-  "gap_risk_score": <1-10>,
-  "iv_spike_risk_score": <1-10>,
-  "overall_risk_score": <1-10>,
-  "recommendation": "TRADE" or "SKIP",
-  "reasoning": "2-3 sentences: What could happen overnight? Why this risk level? What's the FORWARD-LOOKING concern?"
-}}
-
-CRITICAL CALIBRATION:
-• BASELINE = 1-2 (70% of days are quiet, nothing brewing)
-• Only elevate if there's FORWARD-LOOKING escalation risk
-• "News happened" ≠ risk (if fully absorbed by market already)
-• "News developing" = risk (if could worsen overnight)
-• Ask: "Between now and 9:30 AM tomorrow, could this explode?"
-• Be realistic: Stable situations = low scores, not moderate
-
-EXAMPLES:
-
-Score 2: "Markets closed mixed on light volume, no major developments"
-→ Nothing brewing, normal overnight expected
-
-Score 3: "Fed official reiterates rates stance, tech stocks slightly down"  
-→ Already priced, no surprise element
-
-Score 6: "Regional bank reports Q4 loss, stock down 8%, analysts monitoring"
-→ Developing situation, could see more bank issues tomorrow, moderate escalation risk
-
-Score 8: "Major bank halts withdrawals, regulators in emergency talks, contagion fears"
-→ Active crisis, high probability of overnight deterioration, systemic implications"""
-
-    return ask_gpt(prompt)
-
-
-def is_trade_recommended(risk_analysis):
-    """
-    Binary decision: Trade or Skip (no half-sizing for 1-contract trading)
-    Returns: (should_trade: bool, position_size: float, reason: str)
-    """
-    recommendation = risk_analysis.get("recommendation", "TRADE_HALF").upper()
-    overall_risk = risk_analysis.get("overall_risk_score", 5)
-    gap_risk = risk_analysis.get("gap_risk_score", 5)
-    iv_risk = risk_analysis.get("iv_spike_risk_score", 5)
-    reasoning = risk_analysis.get("reasoning", "No reasoning provided")
-    threats = risk_analysis.get("threats_detected", "Unknown")
+    implied_vol = vix_data['current']
+    iv_rv_ratio = implied_vol / realized_vol
     
-    # Simple binary decision: Trade if low-moderate risk, Skip if high risk
-    # Threshold: Score 7+ = Skip, Score <7 = Trade
-    if overall_risk >= 7:
-        return (
-            False, 
-            0.0, 
-            f"HIGH RISK - Skip trade (Overall: {overall_risk}, Gap: {gap_risk}, IV: {iv_risk}). "
-            f"Threats: {threats}. {reasoning}"
-        )
+    if iv_rv_ratio > 1.35:
+        base_score = 1
+    elif iv_rv_ratio > 1.20:
+        base_score = 2
+    elif iv_rv_ratio > 1.10:
+        base_score = 3
+    elif iv_rv_ratio > 1.00:
+        base_score = 4
+    elif iv_rv_ratio > 0.90:
+        base_score = 6
+    elif iv_rv_ratio > 0.80:
+        base_score = 8
     else:
-        return (
-            True, 
-            1.0, 
-            f"TRADE - Risk acceptable (Overall: {overall_risk}, Gap: {gap_risk}, IV: {iv_risk}). "
-            f"{reasoning}"
-        )
+        base_score = 10
+    
+    closes_earlier = spx_data['history_closes'][:11]
+    returns_earlier = []
+    for i in range(1, len(closes_earlier)):
+        returns_earlier.append(math.log(closes_earlier[i] / closes_earlier[i-1]))
+    mean_earlier = sum(returns_earlier) / len(returns_earlier)
+    variance_earlier = sum([(r - mean_earlier)**2 for r in returns_earlier]) / (len(returns_earlier) - 1)
+    rv_5d_ago = math.sqrt(variance_earlier) * math.sqrt(252) * 100
+    
+    rv_change = (realized_vol - rv_5d_ago) / rv_5d_ago
+    
+    if rv_change > 0.30:
+        modifier = +3
+    elif rv_change > 0.15:
+        modifier = +2
+    elif rv_change < -0.20:
+        modifier = -1
+    else:
+        modifier = 0
+    
+    final_score = max(1, min(10, base_score + modifier))
+    
+    return {
+        'score': final_score,
+        'realized_vol': round(realized_vol, 2),
+        'implied_vol': round(implied_vol, 2),
+        'iv_rv_ratio': round(iv_rv_ratio, 3)
+    }
 
+# ============================================================================
+# INDICATOR 2: MARKET TREND (20%)
+# ============================================================================
+
+def analyze_market_trend(spx_data):
+    """Analyze 5-day momentum and intraday volatility"""
+    current = spx_data['current']
+    closes = spx_data['history_closes']
+    spx_5d_ago = closes[-6] if len(closes) >= 6 else current
+    
+    change_5d = (current - spx_5d_ago) / spx_5d_ago
+    
+    if change_5d > 0.04:
+        base_score = 5
+    elif change_5d > 0.02:
+        base_score = 3
+    elif change_5d > 0.01:
+        base_score = 2
+    elif change_5d > -0.01:
+        base_score = 1
+    elif change_5d > -0.02:
+        base_score = 2
+    elif change_5d > -0.04:
+        base_score = 4
+    else:
+        base_score = 7
+    
+    high = spx_data['high_today']
+    low = spx_data['low_today']
+    intraday_range = (high - low) / current
+    
+    if intraday_range > 0.015:
+        modifier = +2
+    elif intraday_range > 0.010:
+        modifier = +1
+    else:
+        modifier = 0
+    
+    final_score = max(1, min(10, base_score + modifier))
+    
+    return {
+        'score': final_score,
+        'change_5d': change_5d,
+        'intraday_range': intraday_range
+    }
+
+# ============================================================================
+# INDICATOR 3: GPT NEWS ANALYSIS (50%) - LAYER 3
+# ============================================================================
+
+def analyze_gpt_news(news_data):
+    """LAYER 3: GPT Triple-Duty Analysis"""
+    
+    if news_data['count'] == 0:
+        return {
+            'score': 5,
+            'raw_score': 5,
+            'category': 'MODERATE',
+            'reasoning': 'No actionable news available - assuming moderate baseline risk',
+            'direction_risk': 'UNKNOWN',
+            'key_risk': 'None',
+            'duplicates_found': 'None'
+        }
+    
+    now = datetime.now(ET)
+    current_time_str = now.strftime("%I:%M %p ET")
+    
+    prompt = f"""You are an expert overnight volatility risk analyst for SPX iron condor positions.
+
+CURRENT TIME: {current_time_str}
+
+CONTEXT:
+- Selling SPX iron condor NOW (2:30-3:30 PM entry)
+- Holding OVERNIGHT (~16 hours until 9:30 AM tomorrow)
+- Iron condor LOSES MONEY from BIG MOVES in EITHER DIRECTION
+
+⚠️ TRIPLE-LAYER FILTERING SYSTEM:
+
+LAYER 1 (COMPLETED): Algorithmic deduplication
+- Removed duplicates using fuzzy matching (85% similarity threshold)
+- Kept best version (most recent + best source)
+
+LAYER 2 (COMPLETED): Keyword filter
+- Removed obvious clickbait: "secret to", "trick to", "shocking"
+- Removed obvious opinion: "why you should", "how to invest"
+- Removed old retrospectives: "last week recap"
+
+LAYER 3 (YOUR JOB - THREE RESPONSIBILITIES):
+
+1️⃣ DUPLICATION SAFETY NET:
+If you notice articles covering the SAME EVENT (algo may have missed some):
+- Count as ONE event, not multiple
+- Examples of duplicates:
+  * "Apple earnings beat expectations" (Reuters)
+  * "Apple beats Q4 earnings forecast" (Bloomberg)
+  * "Apple Q4 results exceed expectations" (Yahoo)
+  → These are ONE event (Apple earnings), not three!
+  
+- How to spot: Same company + same event + similar timeframe = Duplicate
+- Don't let duplicates inflate your risk score
+- Report in "duplicates_found" field
+
+2️⃣ COMMENTARY/NEWS FILTER:
+Filter out sophisticated commentary that keyword filter may have missed:
+
+❌ FILTER OUT:
+- Sophisticated commentary disguised as news:
+  * "Warren Buffett dumps Apple - what it means" (analysis of known action)
+  * "Why Nvidia's earnings matter for your portfolio" (opinion/advice)
+  * "Here's how to play Tesla after earnings" (trading advice)
+  
+- Analysis of OLD events with fresh headlines:
+  * "Markets digest yesterday's Fed decision" (old event)
+  * "Investors react to last week's CPI print" (old data)
+  * "Breaking down Apple's guidance from last quarter" (old news)
+  
+- Speculation dressed as news:
+  * "Apple could announce new product if..." (speculation)
+  * "What Tesla might do next quarter" (prediction)
+  * "AMD may benefit from Nvidia's stumble" (hypothetical)
+
+✅ ANALYZE:
+- Earnings reports released TODAY
+- Company announcements made in last 1-3 hours
+- Analyst upgrades/downgrades issued TODAY
+- Actual price moves happening NOW (stock sinks/soars X%)
+- Breaking regulatory decisions
+- Major product launches TODAY
+
+3️⃣ OVERNIGHT RISK ANALYSIS:
+For UNIQUE, ACTUAL events only:
+
+TIMING - What's NOT PRICED IN:
+🔥 Last 1 hour = NOT priced in → HIGHEST RISK
+🔸 1-3 hours ago = Partially priced in → HIGH RISK
+📊 3-8 hours ago but HUGE (Mag 7 earnings, major guidance) = Still digesting → MODERATE-HIGH
+✅ 8+ hours ago = Mostly priced in → LOW RISK
+
+Remember: Mag 7 (Apple, Microsoft, Google, Amazon, Nvidia, Tesla, Meta) = 30% of SPX
+Their news has DIRECT SPX impact. Small-cap news = Ignore.
+
+NEWS (may contain duplicates/commentary - YOU filter):
+{news_data['summary']}
+
+SCORING - Based on UNIQUE events only:
+1-2: VERY_QUIET - No real unique catalysts, <0.3% overnight move
+3-4: QUIET - 1-2 minor unique events mostly priced, 0.3-0.5% move
+5-6: MODERATE - 2-3 real unique events, 0.5-0.8% move
+7-8: ELEVATED - Major unique catalyst NOT fully priced, 0.8-1.2% move
+9-10: EXTREME - Multiple major unique catalysts or one massive event, >1.2% move
+
+In your reasoning, EXPLICITLY mention:
+- Any duplicates you found (e.g., "Reuters + Bloomberg both covering Apple earnings = ONE event")
+- What you filtered as commentary/old news
+- What UNIQUE, ACTUAL events you found
+- Why those events create overnight risk
+
+Respond in JSON only (no markdown):
+{{
+  "overnight_magnitude_risk_score": 1-10,
+  "risk_category": "VERY_QUIET/QUIET/MODERATE/ELEVATED/EXTREME",
+  "reasoning": "MUST mention: (1) Any duplicates found, (2) Commentary filtered, (3) Unique events analyzed",
+  "key_overnight_risk": "Single most important unique catalyst, or 'None - mostly commentary/duplicates'",
+  "direction_risk": "UP/DOWN/BOTH/NONE",
+  "duplicates_found": "List any duplicate articles (same event from multiple sources), or 'None'"
+}}
+"""
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": "gpt-4-turbo",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 800,
+            "temperature": 0.3
+        }
+        
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            print(f"OpenAI API error: {response.status_code}")
+            return {
+                'score': 5,
+                'raw_score': 5,
+                'category': 'MODERATE',
+                'reasoning': f'API error: {response.status_code}',
+                'direction_risk': 'UNKNOWN',
+                'key_risk': 'API Error',
+                'duplicates_found': 'Error'
+            }
+        
+        result = response.json()
+        response_text = result['choices'][0]['message']['content'].strip()
+        
+        if response_text.startswith('```'):
+            response_text = response_text.split('```')[1]
+            if response_text.startswith('json'):
+                response_text = response_text[4:]
+        
+        gpt_analysis = json.loads(response_text)
+        raw_score = gpt_analysis.get('overnight_magnitude_risk_score', 5)
+        raw_score = max(1, min(10, raw_score))
+        
+        # Calibration
+        if raw_score >= 9:
+            calibrated = raw_score
+        elif raw_score >= 7:
+            calibrated = raw_score - 0.5
+        elif raw_score <= 3:
+            calibrated = raw_score + 0.5
+        else:
+            calibrated = raw_score
+        
+        calibrated = max(1, min(10, round(calibrated)))
+        
+        return {
+            'score': calibrated,
+            'raw_score': raw_score,
+            'category': gpt_analysis.get('risk_category', 'MODERATE'),
+            'reasoning': gpt_analysis.get('reasoning', ''),
+            'key_risk': gpt_analysis.get('key_overnight_risk', 'None'),
+            'direction_risk': gpt_analysis.get('direction_risk', 'UNKNOWN'),
+            'duplicates_found': gpt_analysis.get('duplicates_found', 'None')
+        }
+        
+    except Exception as e:
+        print(f"GPT error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'score': 5,
+            'raw_score': 5,
+            'category': 'MODERATE',
+            'reasoning': f'GPT error: {str(e)}',
+            'direction_risk': 'UNKNOWN',
+            'key_risk': 'Error',
+            'duplicates_found': 'Error'
+        }
+
+# ============================================================================
+# COMPOSITE SCORE & SIGNAL
+# ============================================================================
+
+def calculate_composite_score(indicators):
+    """Composite: IV/RV=30%, Trend=20%, GPT=50%"""
+    weights = {'iv_rv': 0.30, 'trend': 0.20, 'gpt': 0.50}
+    
+    iv_rv_score = indicators['iv_rv']['score']
+    trend_score = indicators['trend']['score']
+    gpt_score = indicators['gpt']['score']
+    
+    composite = (
+        iv_rv_score * weights['iv_rv'] +
+        trend_score * weights['trend'] +
+        gpt_score * weights['gpt']
+    )
+    
+    composite = round(composite, 1)
+    composite = max(1.0, min(10.0, composite))
+    
+    if composite < 2.5:
+        category = "EXCELLENT"
+    elif composite < 3.5:
+        category = "VERY_GOOD"
+    elif composite < 5.0:
+        category = "GOOD"
+    elif composite < 6.5:
+        category = "FAIR"
+    elif composite < 7.5:
+        category = "ELEVATED"
+    else:
+        category = "HIGH"
+    
+    return {'score': composite, 'category': category}
+
+def generate_signal(composite_score):
+    """Generate trading signal"""
+    if composite_score >= 7.5:
+        return {
+            'signal': 'SKIP',
+            'should_trade': False,
+            'reason': f"High risk ({composite_score:.1f})"
+        }
+    elif composite_score >= 5.0:
+        return {
+            'signal': 'TRADE_CONSERVATIVE',
+            'should_trade': True,
+            'reason': f"Elevated risk ({composite_score:.1f})"
+        }
+    elif composite_score >= 3.5:
+        return {
+            'signal': 'TRADE_NORMAL',
+            'should_trade': True,
+            'reason': f"Good setup ({composite_score:.1f})"
+        }
+    else:
+        return {
+            'signal': 'TRADE_AGGRESSIVE',
+            'should_trade': True,
+            'reason': f"Excellent ({composite_score:.1f})"
+        }
+
+def send_webhook(signal_data):
+    """Send webhook to Option Alpha"""
+    signal = signal_data['signal']
+    timestamp = datetime.now(ET).isoformat()
+    
+    if signal == "SKIP":
+        url = WEBHOOK_URLS.get('NO_TRADE')
+        if url:
+            try:
+                payload = {'signal': 'SKIP', 'timestamp': timestamp}
+                response = requests.post(url, json=payload, timeout=10)
+                return {'success': response.status_code in [200, 201, 202]}
+            except:
+                return {'success': False}
+        return {'success': True}
+    
+    url = WEBHOOK_URLS.get(signal)
+    if not url:
+        return {'success': False}
+    
+    try:
+        payload = {'signal': signal, 'timestamp': timestamp}
+        response = requests.post(url, json=payload, timeout=10)
+        return {'success': response.status_code in [200, 201, 202]}
+    except:
+        return {'success': False}
 
 def is_within_trading_window(now=None):
-    """Check if current time is within trading window"""
-    now = now or datetime.now(TRADING_TIMEZONE)
-    if now.weekday() >= 5:  # Weekend
-        return False
+    """PRODUCTION: Check if within 2:30-3:30 PM ET trading window"""
+    if now is None:
+        now = datetime.now(ET)
+    
     current_time = now.time()
     return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
 
-
-def trigger_option_alpha(url, position_size=1.0):
-    """
-    Trigger Option Alpha webhook
-    Note: You might want to modify Option Alpha automation to accept position sizing parameter
-    """
-    try:
-        # If your Option Alpha allows, you could pass position_size as parameter
-        # For now, just trigger the webhook
-        response = requests.post(url)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Error triggering Option Alpha: {e}")
-        return False
-
+# ============================================================================
+# FLASK ROUTES
+# ============================================================================
 
 @app.route("/", methods=["GET"])
 def homepage():
-    """Homepage with strategy information and status"""
-    now = datetime.now(TRADING_TIMEZONE)
+    """Homepage"""
+    now = datetime.now(ET)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-    in_window = is_within_trading_window(now)
-    day_name = now.strftime("%A")
-    is_weekend = now.weekday() >= 5
-    
-    # Calculate next poke time
-    if is_weekend:
-        days_until_monday = (7 - now.weekday()) % 7
-        if days_until_monday == 0:
-            days_until_monday = 1
-        next_poke_date = now + timedelta(days=days_until_monday)
-        next_poke = datetime.combine(next_poke_date.date(), POKE_WINDOW_START)
-        next_poke = next_poke.replace(tzinfo=TRADING_TIMEZONE)
-        next_poke_str = next_poke.strftime("%A, %B %d at %I:%M %p %Z")
-        status = "WEEKEND - No trading"
-    elif not in_window:
-        if now.time() < POKE_WINDOW_START:
-            next_poke = datetime.combine(now.date(), POKE_WINDOW_START)
-            next_poke = next_poke.replace(tzinfo=TRADING_TIMEZONE)
-            next_poke_str = f"Today at {next_poke.strftime('%I:%M %p %Z')}"
-            status = "PRE-MARKET - Waiting for entry window"
-        else:
-            tomorrow = now + timedelta(days=1)
-            while tomorrow.weekday() >= 5:
-                tomorrow += timedelta(days=1)
-            next_poke = datetime.combine(tomorrow.date(), POKE_WINDOW_START)
-            next_poke = next_poke.replace(tzinfo=TRADING_TIMEZONE)
-            next_poke_str = next_poke.strftime("%A, %B %d at %I:%M %p %Z")
-            status = "MARKET CLOSED - Done for today"
-    else:
-        next_poke_str = "Active - checking every 30 minutes"
-        status = "ACTIVE - Entry window open!"
     
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>SPX Overnight Iron Condor Bot</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Ren's SPX Vol Signal (Production)</title>
         <style>
             body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                max-width: 900px;
+                font-family: 'Segoe UI', sans-serif;
+                max-width: 1000px;
                 margin: 40px auto;
                 padding: 20px;
                 background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-                color: #333;
             }}
             .container {{
                 background: white;
                 border-radius: 12px;
-                padding: 35px;
+                padding: 40px;
                 box-shadow: 0 15px 50px rgba(0,0,0,0.3);
             }}
-            h1 {{
-                color: #1e3c72;
-                margin-top: 0;
-                font-size: 28px;
+            .header {{
                 border-bottom: 3px solid #2a5298;
-                padding-bottom: 15px;
+                padding-bottom: 20px;
+                margin-bottom: 30px;
             }}
-            .strategy-box {{
-                background: #f0f7ff;
-                border-left: 5px solid #2a5298;
-                padding: 20px;
-                margin: 20px 0;
-                border-radius: 5px;
+            h1 {{ 
+                color: #1e3c72; 
+                margin: 0 0 10px 0;
+                font-size: 32px;
             }}
-            .strategy-box h3 {{
-                margin-top: 0;
-                color: #1e3c72;
+            .subtitle {{
+                color: #64748b;
+                font-size: 16px;
+                font-weight: 500;
             }}
             .status {{
                 display: inline-block;
                 padding: 10px 20px;
                 border-radius: 25px;
                 font-weight: bold;
-                font-size: 15px;
-                margin: 15px 0;
-            }}
-            .status.active {{
                 background: #10b981;
                 color: white;
+                margin-top: 15px;
             }}
-            .status.waiting {{
-                background: #f59e0b;
-                color: white;
-            }}
-            .status.weekend {{
-                background: #6b7280;
-                color: white;
-            }}
-            .info-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 15px;
+            .section {{
                 margin: 25px 0;
-            }}
-            .info-item {{
-                padding: 18px;
-                background: #f9fafb;
+                padding: 20px;
+                background: #f8fafc;
                 border-radius: 8px;
                 border-left: 4px solid #2a5298;
             }}
-            .info-item strong {{
-                display: block;
-                color: #1e3c72;
-                margin-bottom: 8px;
-                font-size: 13px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }}
-            .info-item span {{
+            .section-title {{
                 font-size: 18px;
-                color: #1f2937;
+                font-weight: 700;
+                color: #1e3c72;
+                margin: 0 0 15px 0;
             }}
-            .endpoints {{
-                margin-top: 30px;
-                padding-top: 20px;
-                border-top: 2px solid #e5e7eb;
+            .info-item {{
+                margin: 8px 0;
+                padding: 8px 12px;
+                background: white;
+                border-radius: 6px;
+                font-size: 14px;
+            }}
+            .info-label {{
+                font-weight: 600;
+                color: #475569;
+                display: inline-block;
+                min-width: 150px;
+            }}
+            .info-value {{
+                color: #1e293b;
+            }}
+            .strategy-box {{
+                background: #eff6ff;
+                border: 2px solid #3b82f6;
+                padding: 20px;
+                border-radius: 8px;
+                margin: 25px 0;
+            }}
+            .strategy-title {{
+                font-size: 20px;
+                font-weight: 700;
+                color: #1e40af;
+                margin: 0 0 15px 0;
+            }}
+            .edge-item {{
+                padding: 10px 0;
+                border-bottom: 1px solid #cbd5e1;
+            }}
+            .edge-item:last-child {{
+                border-bottom: none;
+            }}
+            .edge-label {{
+                font-weight: 600;
+                color: #1e40af;
+            }}
+            .edge-desc {{
+                color: #475569;
+                margin-top: 5px;
+                font-size: 14px;
             }}
             .endpoint {{
                 background: #f3f4f6;
                 padding: 14px;
+                margin: 10px 0;
                 border-radius: 6px;
-                margin: 12px 0;
-                font-family: 'Courier New', monospace;
+                font-family: monospace;
                 font-size: 14px;
             }}
-            .endpoint a {{
-                color: #2a5298;
-                text-decoration: none;
-                font-weight: bold;
+            .endpoint a {{ 
+                color: #2a5298; 
+                text-decoration: none; 
+                font-weight: bold; 
             }}
             .endpoint a:hover {{
                 text-decoration: underline;
-            }}
-            .warning {{
-                background: #fef3c7;
-                border-left: 5px solid #f59e0b;
-                padding: 15px;
-                margin: 20px 0;
-                border-radius: 5px;
-            }}
-            footer {{
-                margin-top: 35px;
-                padding-top: 20px;
-                border-top: 1px solid #e5e7eb;
-                color: #6b7280;
-                font-size: 14px;
-                text-align: center;
             }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>📊 SPX Overnight Iron Condor Bot</h1>
+            <div class="header">
+                <h1>📊 Ren's SPX Vol Signal</h1>
+                <div class="subtitle">Automated SPX Overnight Iron Condor Decision System (Production)</div>
+                <div class="status">LIVE ON RAILWAY</div>
+            </div>
             
             <div class="strategy-box">
-                <h3>🎯 Strategy Overview</h3>
-                <p><strong>Entry:</strong> 2:30-3:30 PM ET (afternoon positioning)</p>
-                <p><strong>Product:</strong> SPX Iron Condor (1 DTE)</p>
-                <p><strong>Hold:</strong> Overnight</p>
-                <p><strong>Exit:</strong> Next morning at 15% profit target</p>
-                <p><strong>Edge:</strong> Capture overnight risk premium decay + IV crush</p>
-            </div>
-            
-            <div class="status {'active' if in_window and not is_weekend else 'waiting' if not is_weekend else 'weekend'}">
-                {status}
-            </div>
-            
-            <div class="info-grid">
-                <div class="info-item">
-                    <strong>Current Time</strong>
-                    <span>{timestamp}</span>
+                <div class="strategy-title">🎯 Trading Strategy: Overnight Vol Premium Capture</div>
+                
+                <div class="edge-item">
+                    <div class="edge-label">📈 Core Edge:</div>
+                    <div class="edge-desc">
+                        Sell SPX iron condors (2:30-3:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility 
+                        and overnight news risk is manageable. Capture theta decay + vol premium during the ~16-hour overnight period.
+                    </div>
                 </div>
                 
-                <div class="info-item">
-                    <strong>Trading Day</strong>
-                    <span>{day_name} {'(Weekend)' if is_weekend else '(Weekday)'}</span>
+                <div class="edge-item">
+                    <div class="edge-label">🔍 Signal Components (3 Indicators):</div>
+                    <div class="edge-desc">
+                        <strong>1. IV/RV Ratio (30%):</strong> Measures if options are expensive vs recent realized moves.<br>
+                        <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
+                        <strong>3. GPT News Analysis (50%):</strong> Triple-layer filtering (Algo dedup → Keyword → GPT).
+                    </div>
                 </div>
                 
-                <div class="info-item">
-                    <strong>Entry Window</strong>
-                    <span>Mon-Fri, 2:30-3:30 PM ET</span>
-                </div>
-                
-                <div class="info-item">
-                    <strong>Check Interval</strong>
-                    <span>Every 20 minutes</span>
-                </div>
-                
-                <div class="info-item">
-                    <strong>Next Check</strong>
-                    <span>{next_poke_str}</span>
+                <div class="edge-item">
+                    <div class="edge-label">⚡ Trade Sizing Logic:</div>
+                    <div class="edge-desc">
+                        <strong>AGGRESSIVE:</strong> Score &lt;3.5 → 20pt width, 0.18 delta<br>
+                        <strong>NORMAL:</strong> Score 3.5-5.0 → 25pt width, 0.16 delta<br>
+                        <strong>CONSERVATIVE:</strong> Score 5.0-7.5 → 30pt width, 0.14 delta<br>
+                        <strong>SKIP:</strong> Score ≥7.5 → No trade
+                    </div>
                 </div>
             </div>
             
-            <div class="warning">
-                <strong>⚠️ Risk Management Active</strong><br>
-                Bot analyzes overnight gap risk using GPT-4 before each trade decision.
-                Skips high-risk days automatically.
+            <div class="section">
+                <div class="section-title">⚙️ System Information</div>
+                <div class="info-item">
+                    <span class="info-label">Current Time:</span>
+                    <span class="info-value">{timestamp}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Trading Window:</span>
+                    <span class="info-value">2:30 PM - 3:30 PM ET (Production)</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Environment:</span>
+                    <span class="info-value">Railway (Production)</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">News Sources:</span>
+                    <span class="info-value">Yahoo Finance RSS + Google News RSS (FREE)</span>
+                </div>
             </div>
             
-            <div class="endpoints">
-                <h3>📡 Available Endpoints</h3>
-                <div class="endpoint">
-                    <a href="/health">/health</a> - Quick system health check
-                </div>
-                <div class="endpoint">
-                    <a href="/option_alpha_trigger">/option_alpha_trigger</a> - Trade decision endpoint
-                </div>
+            <div class="section">
+                <div class="section-title">🔗 API Endpoints</div>
+                <div class="endpoint"><a href="/health">/health</a> - Health check</div>
+                <div class="endpoint"><a href="/option_alpha_trigger">/option_alpha_trigger</a> - Generate signal</div>
             </div>
-            
-            <footer>
-                🤖 Overnight Premium Capture System | GPT-4 Risk Analysis | Railway Hosting
-            </footer>
         </div>
     </body>
     </html>
     """
     return html
 
-
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint"""
-    now = datetime.now(TRADING_TIMEZONE)
-    timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-    in_window = is_within_trading_window(now)
-    
+    """Health check"""
+    now = datetime.now(ET)
     return jsonify({
         "status": "healthy",
-        "timestamp": timestamp,
-        "entry_window_active": in_window,
-        "entry_window": "Mon-Fri 2:30-3:30 PM ET",
-        "strategy": "SPX overnight iron condor"
+        "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
+        "environment": "production",
+        "trading_window": "2:30-3:30 PM ET",
+        "filtering": "Triple-layer (Algo dedup → Keyword → GPT)"
     }), 200
-
 
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
 def option_alpha_trigger():
-    """
-    Main trading decision endpoint
-    Analyzes overnight risk and triggers appropriate webhook
-    """
-    now = datetime.now(TRADING_TIMEZONE)
+    """Main trading decision endpoint"""
+    now = datetime.now(ET)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     
-    print(f"[{timestamp}] Received request to /option_alpha_trigger")
+    print(f"\n[{timestamp}] /option_alpha_trigger called")
+    
+    # Check trading window
+    if not is_within_trading_window(now):
+        return jsonify({
+            "status": "outside_window",
+            "message": "Outside trading window (2:30-3:30 PM ET)",
+            "timestamp": timestamp
+        }), 200
     
     try:
-        # Check if within trading window
-        if not is_within_trading_window(now):
-            current_time_str = now.strftime("%I:%M %p")
-            day_name = now.strftime("%A")
-            is_weekend = now.weekday() >= 5
-            
-            if is_weekend:
-                reason = f"Weekend ({day_name}) - Our strategy only trades Mon-Fri"
-            else:
-                reason = f"Outside our desired trading window (2:30-3:30 PM ET). Current time: {current_time_str}"
-            
-            message = f"Request not processed. {reason}"
-            print(f"[{timestamp}] {message}")
-            return jsonify({
-                "status": "outside_window",
-                "message": message,
-                "reason": "outside_desired_window" if not is_weekend else "weekend",
-                "our_trading_window": "Mon-Fri 2:30-3:30 PM ET",
-                "current_time": timestamp,
-                "note": "Market may be open, but we only enter positions during our specific window"
-            }), 200
+        print(f"[{timestamp}] Fetching market data...")
         
-        print(f"[{timestamp}] Within entry window - analyzing overnight risk...")
+        spx_data = get_spx_data()
+        if not spx_data:
+            return jsonify({"status": "error", "message": "SPX failed"}), 500
         
-        # Fetch latest news
-        news_headlines, news_summary = fetch_breaking_news()
-        print(f"[{timestamp}] Fetched {len(news_headlines)} news headlines")
+        vix_data = get_vix_data()
+        if not vix_data:
+            return jsonify({"status": "error", "message": "VIX failed"}), 500
         
-        # Analyze overnight gap risk with GPT
-        risk_analysis = analyze_overnight_risk(news_summary)
-        print(f"[{timestamp}] GPT Risk Analysis: {json.dumps(risk_analysis, indent=2)}")
+        # Fetch news
+        news_data = fetch_news_multi_source()
         
-        # Determine trade decision
-        should_trade, position_size, reason = is_trade_recommended(risk_analysis)
+        print(f"[{timestamp}] Running indicators...")
         
-        # Execute decision
-        if should_trade:
-            success = trigger_option_alpha(trade_url, position_size)
-            action = "EXECUTE TRADE" if position_size == 1.0 else f"EXECUTE TRADE ({int(position_size*100)}% size)"
-            message = f"{action} - {reason}" if success else f"Failed to trigger: {reason}"
-            print(f"[{timestamp}] Decision: {action}")
-            print(f"[{timestamp}] Webhook trigger {'successful' if success else 'failed'}")
-        else:
-            success = trigger_option_alpha(no_trade_url)
-            message = f"SKIP TRADE - {reason}"
-            print(f"[{timestamp}] Decision: SKIP - {reason}")
-            print(f"[{timestamp}] No-trade webhook trigger {'successful' if success else 'failed'}")
+        # Run indicators
+        iv_rv = analyze_iv_rv_ratio(spx_data, vix_data)
+        trend = analyze_market_trend(spx_data)
+        gpt = analyze_gpt_news(news_data)
         
-        # Return comprehensive response
+        indicators = {'iv_rv': iv_rv, 'trend': trend, 'gpt': gpt}
+        
+        # Composite
+        composite = calculate_composite_score(indicators)
+        
+        # Signal
+        signal = generate_signal(composite['score'])
+        
+        # Webhook
+        webhook = send_webhook(signal)
+        
+        print(f"[{timestamp}] Decision: {signal['signal']} (Score: {composite['score']:.1f})")
+        
+        # Format news headlines
+        news_headlines = []
+        if news_data.get('articles'):
+            for article in news_data['articles'][:25]:
+                time_str = article['published_time'].strftime("%I:%M %p")
+                hours_ago = article['hours_ago']
+                
+                if hours_ago < 1:
+                    recency = "⚠️"
+                elif hours_ago < 3:
+                    recency = "🔸"
+                else:
+                    recency = "•"
+                
+                priority = "🔥" if article.get('priority') == 'HIGH' else ""
+                
+                news_headlines.append(f"{recency} [{time_str}] {priority}{article['title']}")
+        
+        # Get filter stats
+        filter_stats = news_data.get('filter_stats', {
+            'raw_articles': 0,
+            'duplicates_removed': 0,
+            'unique_articles': 0,
+            'junk_filtered': 0,
+            'sent_to_gpt': 0
+        })
+        
+        # Response
         return jsonify({
             "status": "success",
             "timestamp": timestamp,
-            "decision": "TRADE" if should_trade else "SKIP",
-            "position_size": f"{int(position_size*100)}%",
-            "message": message,
-            "risk_analysis": {
-                "overall_risk_score": risk_analysis.get("overall_risk_score"),
-                "gap_risk_score": risk_analysis.get("gap_risk_score"),
-                "iv_spike_risk_score": risk_analysis.get("iv_spike_risk_score"),
-                "threats_detected": risk_analysis.get("threats_detected"),
-                "recommendation": risk_analysis.get("recommendation"),
-                "reasoning": risk_analysis.get("reasoning")
+            "environment": "production",
+            
+            # ========== FINAL DECISION ==========
+            "decision": signal['signal'],
+            "composite_score": composite['score'],
+            "category": composite['category'],
+            "reason": signal['reason'],
+            
+            # ========== MARKET DATA ==========
+            "market_data": {
+                "spx_current": spx_data['current'],
+                "spx_high": spx_data['high_today'],
+                "spx_low": spx_data['low_today'],
+                "vix_current": vix_data['current']
             },
-            "news_count": len(news_headlines),
-            "webhook_triggered": success
+            
+            # ========== INDICATOR 1: IV/RV RATIO (30%) ==========
+            "indicator_1_iv_rv": {
+                "weight": "30%",
+                "score": iv_rv['score'],
+                "iv_rv_ratio": iv_rv['iv_rv_ratio'],
+                "realized_vol": f"{iv_rv['realized_vol']}%",
+                "implied_vol": f"{iv_rv['implied_vol']}%"
+            },
+            
+            # ========== INDICATOR 2: MARKET TREND (20%) ==========
+            "indicator_2_trend": {
+                "weight": "20%",
+                "score": trend['score'],
+                "trend_change_5d": f"{trend['change_5d'] * 100:+.2f}%",
+                "intraday_range": f"{trend['intraday_range'] * 100:.2f}%"
+            },
+            
+            # ========== INDICATOR 3: NEWS + GPT (50%) ==========
+            "indicator_3_news_gpt": {
+                "weight": "50%",
+                
+                "triple_layer_pipeline": {
+                    "layer_1_algo_dedup": {
+                        "raw_articles_fetched": filter_stats['raw_articles'],
+                        "duplicates_removed": filter_stats['duplicates_removed'],
+                        "unique_articles": filter_stats['unique_articles']
+                    },
+                    "layer_2_keyword_filter": {
+                        "junk_filtered": filter_stats['junk_filtered'],
+                        "sent_to_gpt": filter_stats['sent_to_gpt']
+                    },
+                    "layer_3_gpt": {
+                        "duplicates_found_by_gpt": gpt.get('duplicates_found', 'None'),
+                        "description": "GPT triple-duty: duplication safety + commentary filter + risk analysis"
+                    }
+                },
+                
+                "headlines_analyzed": news_headlines,
+                
+                "gpt_analysis": {
+                    "score": gpt['score'],
+                    "category": gpt['category'],
+                    "key_risk": gpt.get('key_risk', 'None'),
+                    "direction": gpt.get('direction_risk', 'UNKNOWN'),
+                    "reasoning": gpt['reasoning']
+                }
+            },
+            
+            # ========== WEBHOOK ==========
+            "webhook_success": webhook.get('success', False)
+            
         }), 200
         
     except Exception as e:
-        error_msg = f"Error: {str(e)}"
-        print(f"[{timestamp}] ERROR: {error_msg}")
+        print(f"[{timestamp}] ERROR: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({
-            "status": "error",
-            "message": error_msg,
-            "timestamp": timestamp
-        }), 500
-
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 def poke_self():
-    """
-    Background thread for smart trade checking:
-    - Waits for Flask to be ready (with health check)
-    - Checks immediately after ready (if in window)
-    - Then aligns to 30-minute intervals: 2:30, 3:00, 3:30 PM ET
-    """
-    port = os.environ.get("PORT", "8080")
-    
-    # Wait for Flask to be ready with health checks
-    print(f"[POKE THREAD] Started - waiting for Flask to be ready...")
-    max_wait = 30  # Maximum 30 seconds
-    wait_interval = 2  # Check every 2 seconds
-    elapsed = 0
-    
-    while elapsed < max_wait:
-        try:
-            # Try to hit health endpoint
-            health_url = f"http://127.0.0.1:{port}/health"
-            response = requests.get(health_url, timeout=2)
-            if response.status_code == 200:
-                print(f"[POKE THREAD] ✓ Flask is ready (health check passed after {elapsed}s)")
-                break
-        except:
-            # Flask not ready yet
-            pass
-        
-        time.sleep(wait_interval)
-        elapsed += wait_interval
-    
-    if elapsed >= max_wait:
-        print(f"[POKE THREAD] ⚠ Flask health check timeout after {max_wait}s, proceeding anyway...")
-    
-    print(f"[POKE THREAD] Will check immediately, then at 2:30, 2:50, 3:10, 3:30 PM ET on Mon-Fri")
-    
-    first_check = True  # Flag for immediate first check
+    """Background thread: Trigger analysis every 20 minutes during trading hours"""
+    print("[POKE] Background thread started - 20-minute intervals during trading hours")
     
     while True:
-        now = datetime.now(TRADING_TIMEZONE)
-        timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-        
-        # First check: immediate (no sleep)
-        if first_check:
-            print(f"[{timestamp}] First check - executing immediately...")
-            first_check = False
-            # Don't sleep, proceed to check below
-        else:
-            # Subsequent checks: calculate smart sleep to next target time
-            current_minute = now.hour * 60 + now.minute
-            
-            # Target minutes: 2:30 PM (870), 2:50 PM (890), 3:10 PM (910), 3:30 PM (930)
-            target_minutes = [870, 890, 910, 930]
-            
-            # Find next target
-            next_target = None
-            for target in target_minutes:
-                if current_minute < target - 1:  # -1 to ensure we don't miss it
-                    next_target = target
-                    break
-            
-            # Calculate next check time
-            if next_target is None:
-                # No target today, next is tomorrow at 2:30 PM
-                tomorrow = now + timedelta(days=1)
-                next_check_time = datetime.combine(
-                    tomorrow.date(), 
-                    dt_time(hour=14, minute=30),
-                    tzinfo=TRADING_TIMEZONE
-                )
-            else:
-                # Next target today
-                target_hour = next_target // 60
-                target_minute = next_target % 60
-                next_check_time = datetime.combine(
-                    now.date(),
-                    dt_time(hour=target_hour, minute=target_minute),
-                    tzinfo=TRADING_TIMEZONE
-                )
-            
-            # Calculate sleep duration
-            sleep_seconds = (next_check_time - now).total_seconds()
-            
-            # Add 5 second buffer to ensure we wake after target
-            sleep_seconds = max(sleep_seconds + 5, 60)  # Minimum 60 seconds
-            
-            next_check_str = next_check_time.strftime("%I:%M:%S %p")
-            print(f"[{timestamp}] Sleeping {int(sleep_seconds)}s until next check at {next_check_str}...")
-            time.sleep(sleep_seconds)
-            
-            # Update timestamp after sleep
-            now = datetime.now(TRADING_TIMEZONE)
-            timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-        
-        # Perform the check
-        if now.weekday() < 5:  # Weekday
+        try:
+            now = datetime.now(ET)
             current_time = now.time()
             
-            if POKE_WINDOW_START <= current_time <= POKE_WINDOW_END:
-                # Within window - execute check
-                try:
-                    url = f"http://127.0.0.1:{port}/option_alpha_trigger"
-                    print(f"[{timestamp}] ✓ Within window (2:30-3:30 PM) - Checking trade decision at {url}...")
-                    r = requests.get(url, timeout=60)
-                    print(f"[{timestamp}] Check completed - Status: {r.status_code}")
-                    
-                    # Log the decision
-                    if r.status_code == 200:
-                        result = r.json()
-                        decision = result.get('decision', 'UNKNOWN')
-                        pos_size = result.get('position_size', 'N/A')
-                        print(f"[{timestamp}] Trade Decision: {decision} (Size: {pos_size})")
-                    
-                except Exception as e:
-                    print(f"[{timestamp}] ERROR checking trade decision: {e}")
-            else:
-                # Outside window
-                current_time_str = now.strftime("%I:%M %p")
-                print(f"[{timestamp}] ✗ Outside window (2:30-3:30 PM ET) - Current: {current_time_str}, skipping check.")
-        else:
-            # Weekend
-            day_name = now.strftime("%A")
-            print(f"[{timestamp}] Weekend ({day_name}), no checks needed.")
-
-
-
+            # Check if within trading window
+            if is_within_trading_window(now):
+                # Check if on 20-minute mark (2:30, 2:50, 3:10, 3:30)
+                if current_time.minute in [30, 50, 10] and current_time.second < 30:
+                    print(f"\n[POKE] Triggering analysis at {now.strftime('%I:%M %p ET')}")
+                    try:
+                        requests.get("http://localhost:8080/option_alpha_trigger", timeout=60)
+                    except Exception as e:
+                        print(f"[POKE] Error triggering: {e}")
+            
+            time_module.sleep(30)  # Check every 30 seconds
+            
+        except Exception as e:
+            print(f"[POKE] Background error: {e}")
+            time_module.sleep(60)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    PORT = int(os.environ.get("PORT", 8080))
     
     print("=" * 80)
-    print("SPX Overnight Iron Condor Strategy Bot")
+    print("Ren's SPX Vol Signal - Production (Railway)")
     print("=" * 80)
-    print(f"Port: {port}")
-    print(f"Entry Window: Mon-Fri 2:30-3:30 PM ET")
-    print(f"Check Interval: Every 20 minutes")
-    print(f"Check Window: Mon-Fri 2:30-3:30 PM ET (checks at 2:30, 2:50, 3:10, 3:30)")
-    print(f"VIX Threshold: {VIX_THRESHOLD} (above this = auto skip)")
-    print("Strategy: Sell overnight premium, capture IV crush")
+    print(f"Port: {PORT}")
+    print(f"Trading Window: 2:30-3:30 PM ET")
+    print(f"Process: Algo Dedup → Keyword → GPT")
     print("=" * 80)
     
-    # Start background poke thread
+    # Start background thread
     t = threading.Thread(target=poke_self, daemon=True)
     t.start()
     
-    # Start Flask
-    print(f"Starting Flask app on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

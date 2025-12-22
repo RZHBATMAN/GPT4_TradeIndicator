@@ -426,15 +426,41 @@ def fetch_news_multi_source():
 # ============================================================================
 
 def get_spx_data():
-    """Fetch SPX data from Yahoo Finance"""
+    """Fetch SPX data from Yahoo Finance - Robust for market hours"""
     try:
         spx = yf.Ticker("^GSPC")
-        today_data = spx.history(period="1d")
-        current_price = today_data['Close'].iloc[-1]
-        high_today = today_data['High'].iloc[-1]
-        low_today = today_data['Low'].iloc[-1]
-        history = spx.history(period="15d")
+        
+        # Get current/real-time price
+        try:
+            # Try fast_info first (most reliable for current price)
+            current_price = spx.fast_info['lastPrice']
+        except:
+            # Fallback: Get last available price from recent history
+            recent = spx.history(period="2d", interval="1m")
+            if recent.empty:
+                print("  ERROR: Cannot get current SPX price")
+                return None
+            current_price = recent['Close'].iloc[-1]
+        
+        # Get intraday high/low (today's range)
+        intraday = spx.history(period="1d", interval="5m")
+        if not intraday.empty and len(intraday) > 0:
+            high_today = intraday['High'].max()
+            low_today = intraday['Low'].min()
+        else:
+            # Market hasn't moved yet or data unavailable - use current as both
+            high_today = current_price
+            low_today = current_price
+        
+        # Get historical daily closes (for RV calculation)
+        history = spx.history(period="15d", interval="1d")
+        if history.empty or len(history) < 6:
+            print("  ERROR: Insufficient historical data")
+            return None
+        
         closes = history['Close'].values
+        
+        print(f"  ✅ SPX: Current={current_price:.2f}, High={high_today:.2f}, Low={low_today:.2f}")
         
         return {
             'current': float(current_price),
@@ -442,8 +468,11 @@ def get_spx_data():
             'low_today': float(low_today),
             'history_closes': [float(x) for x in closes]
         }
+        
     except Exception as e:
-        print(f"Error fetching SPX: {e}")
+        print(f"  ❌ ERROR fetching SPX: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_overnight_iv():

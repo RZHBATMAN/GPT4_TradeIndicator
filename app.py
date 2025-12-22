@@ -3,6 +3,7 @@
 SPX Overnight Vol Premium Bot - Railway Production (No feedparser)
 Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
 Uses direct HTTP + XML parsing instead of feedparser
+UPDATED: Proper 1-day IV/RV ratio calculation
 """
 
 from flask import Flask, jsonify
@@ -445,25 +446,55 @@ def get_spx_data():
         print(f"Error fetching SPX: {e}")
         return None
 
-def get_vix_data():
-    """Fetch VIX data"""
+def get_overnight_iv():
+    """
+    Get overnight IV from VIX1D directly
+    Returns None on any failure (including empty data)
+    """
     try:
-        vix = yf.Ticker("^VIX")
-        today_data = vix.history(period="1d")
-        current_vix = today_data['Close'].iloc[-1]
-        return {'current': float(current_vix)}
+        print("  [Fetching VIX1D (1-day IV ticker)...]")
+        vix1d = yf.Ticker("^VIX1D")
+        data = vix1d.history(period="1d")
+        
+        # Check if data is empty or invalid
+        if data.empty or len(data) == 0:
+            print("  ❌ ERROR: VIX1D returned empty data")
+            return None
+        
+        # Extract IV value
+        iv_value = float(data['Close'].iloc[-1])
+        
+        # Sanity check (VIX1D should be between 5-100%)
+        if iv_value < 5 or iv_value > 100:
+            print(f"  ❌ ERROR: VIX1D value {iv_value:.2f}% is outside normal range (5-100%)")
+            return None
+        
+        # Success!
+        print(f"  ✅ VIX1D = {iv_value:.2f}%")
+        
+        return {
+            'current': iv_value,
+            'tenor': '1-day',
+            'source': 'VIX1D_direct',
+            'method': 'Direct ticker fetch'
+        }
+            
     except Exception as e:
-        print(f"Error fetching VIX: {e}")
+        print(f"  ❌ ERROR: VIX1D fetch failed - {str(e)}")
         return None
 
 # ============================================================================
 # INDICATOR 1: IV/RV RATIO (30%)
 # ============================================================================
 
-def analyze_iv_rv_ratio(spx_data, vix_data):
-    """Analyze Implied Vol vs Realized Vol"""
-    closes = spx_data['history_closes'][-11:]
+def analyze_iv_rv_ratio(spx_data, iv_data):
+    """
+    Analyze IV/RV ratio with MATCHED 1-day tenor
+    """
+    # For 1-day IV, use recent 5-day realized volatility
+    closes = spx_data['history_closes'][-6:]  # Last 6 days to get 5 daily returns
     
+    # Calculate realized volatility
     returns = []
     for i in range(1, len(closes)):
         daily_return = math.log(closes[i] / closes[i-1])
@@ -473,11 +504,12 @@ def analyze_iv_rv_ratio(spx_data, vix_data):
     squared_diffs = [(r - mean_return)**2 for r in returns]
     variance = sum(squared_diffs) / (len(returns) - 1)
     daily_std = math.sqrt(variance)
-    realized_vol = daily_std * math.sqrt(252) * 100
+    realized_vol = daily_std * math.sqrt(252) * 100  # Annualized
     
-    implied_vol = vix_data['current']
+    implied_vol = iv_data['current']
     iv_rv_ratio = implied_vol / realized_vol
     
+    # Scoring logic
     if iv_rv_ratio > 1.35:
         base_score = 1
     elif iv_rv_ratio > 1.20:
@@ -493,24 +525,31 @@ def analyze_iv_rv_ratio(spx_data, vix_data):
     else:
         base_score = 10
     
-    closes_earlier = spx_data['history_closes'][:11]
+    # RV change modifier (compare recent RV to earlier RV)
+    closes_earlier = spx_data['history_closes'][-11:-5]  # 5 days before the recent 5
+    
     returns_earlier = []
     for i in range(1, len(closes_earlier)):
         returns_earlier.append(math.log(closes_earlier[i] / closes_earlier[i-1]))
-    mean_earlier = sum(returns_earlier) / len(returns_earlier)
-    variance_earlier = sum([(r - mean_earlier)**2 for r in returns_earlier]) / (len(returns_earlier) - 1)
-    rv_5d_ago = math.sqrt(variance_earlier) * math.sqrt(252) * 100
     
-    rv_change = (realized_vol - rv_5d_ago) / rv_5d_ago
-    
-    if rv_change > 0.30:
-        modifier = +3
-    elif rv_change > 0.15:
-        modifier = +2
-    elif rv_change < -0.20:
-        modifier = -1
+    if len(returns_earlier) > 0:
+        mean_earlier = sum(returns_earlier) / len(returns_earlier)
+        variance_earlier = sum([(r - mean_earlier)**2 for r in returns_earlier]) / (len(returns_earlier) - 1)
+        rv_earlier = math.sqrt(variance_earlier) * math.sqrt(252) * 100
+        
+        rv_change = (realized_vol - rv_earlier) / rv_earlier if rv_earlier > 0 else 0
+        
+        if rv_change > 0.30:
+            modifier = +3
+        elif rv_change > 0.15:
+            modifier = +2
+        elif rv_change < -0.20:
+            modifier = -1
+        else:
+            modifier = 0
     else:
         modifier = 0
+        rv_change = 0
     
     final_score = max(1, min(10, base_score + modifier))
     
@@ -518,7 +557,10 @@ def analyze_iv_rv_ratio(spx_data, vix_data):
         'score': final_score,
         'realized_vol': round(realized_vol, 2),
         'implied_vol': round(implied_vol, 2),
-        'iv_rv_ratio': round(iv_rv_ratio, 3)
+        'iv_rv_ratio': round(iv_rv_ratio, 3),
+        'tenor': '1-day',
+        'source': iv_data.get('source', 'Unknown'),
+        'rv_change': round(rv_change, 3)
     }
 
 # ============================================================================
@@ -1022,7 +1064,7 @@ def homepage():
                 <div class="edge-item">
                     <div class="edge-label">🔍 Signal Components (3 Indicators):</div>
                     <div class="edge-desc">
-                        <strong>1. IV/RV Ratio (30%):</strong> Measures if options are expensive vs recent realized moves.<br>
+                        <strong>1. IV/RV Ratio (30%):</strong> 1-day implied vol vs 5-day realized vol (matched tenors).<br>
                         <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
                         <strong>3. GPT News Analysis (50%):</strong> Triple-layer filtering (Algo dedup → Keyword → GPT).
                     </div>
@@ -1054,6 +1096,10 @@ def homepage():
                     <span class="info-value">Railway Production</span>
                 </div>
                 <div class="info-item">
+                    <span class="info-label">IV Source:</span>
+                    <span class="info-value">VIX1D (1-day tenor)</span>
+                </div>
+                <div class="info-item">
                     <span class="info-label">News Parsing:</span>
                     <span class="info-value">Direct HTTP + XML (No feedparser dependency)</span>
                 </div>
@@ -1080,6 +1126,7 @@ def health_check():
         "environment": "production",
         "trading_window": "2:30-3:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
+        "iv_source": "VIX1D (1-day tenor)",
         "news_parser": "Direct HTTP + XML (No feedparser)"
     }), 200
 
@@ -1106,9 +1153,12 @@ def option_alpha_trigger():
         if not spx_data:
             return jsonify({"status": "error", "message": "SPX failed"}), 500
         
-        vix_data = get_vix_data()
-        if not vix_data:
-            return jsonify({"status": "error", "message": "VIX failed"}), 500
+        iv_data = get_overnight_iv()
+        if not iv_data:
+            return jsonify({
+                "status": "error", 
+                "message": "Failed to get overnight IV (VIX1D failed)"
+            }), 500
         
         # Fetch news
         news_data = fetch_news_multi_source()
@@ -1116,7 +1166,7 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Running indicators...")
         
         # Run indicators
-        iv_rv = analyze_iv_rv_ratio(spx_data, vix_data)
+        iv_rv = analyze_iv_rv_ratio(spx_data, iv_data)
         trend = analyze_market_trend(spx_data)
         gpt = analyze_gpt_news(news_data)
         
@@ -1175,7 +1225,9 @@ def option_alpha_trigger():
                 "spx_current": spx_data['current'],
                 "spx_high": spx_data['high_today'],
                 "spx_low": spx_data['low_today'],
-                "vix_current": vix_data['current']
+                "overnight_iv": iv_data['current'],
+                "iv_source": iv_data.get('source', 'Unknown'),
+                "iv_method": iv_data.get('method', 'Unknown')
             },
             
             "indicator_1_iv_rv": {
@@ -1183,7 +1235,9 @@ def option_alpha_trigger():
                 "score": iv_rv['score'],
                 "iv_rv_ratio": iv_rv['iv_rv_ratio'],
                 "realized_vol": f"{iv_rv['realized_vol']}%",
-                "implied_vol": f"{iv_rv['implied_vol']}%"
+                "implied_vol": f"{iv_rv['implied_vol']}%",
+                "tenor": "1-day",
+                "iv_source": iv_rv.get('source', 'Unknown')
             },
             
             "indicator_2_trend": {
@@ -1261,10 +1315,11 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     
     print("=" * 80)
-    print("Ren's SPX Vol Signal - Production (Nuclear Version)")
+    print("Ren's SPX Vol Signal - Production (Nuclear + 1-Day IV/RV)")
     print("=" * 80)
     print(f"Port: {PORT}")
     print(f"Trading Window: 2:30-3:30 PM ET")
+    print(f"IV Source: VIX1D (1-day tenor)")
     print(f"News Parser: Direct HTTP + XML (No feedparser)")
     print("=" * 80)
     

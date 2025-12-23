@@ -1806,7 +1806,198 @@ def test_alpha_vantage():
 
 
 
-
+@app.route("/test_fmp", methods=["GET"])
+def test_fmp():
+    """Test Financial Modeling Prep API - SPX, VIX, and controls"""
+    results = {
+        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production',
+        'api_provider': 'Financial Modeling Prep (FMP)',
+        'api_website': 'https://financialmodelingprep.com'
+    }
+    
+    # Check if we have FMP_API_KEY
+    FMP_API_KEY = os.environ.get('FMP_API_KEY')
+    
+    # ========================================================================
+    # TEST FMP API KEY
+    # ========================================================================
+    results['api_key_check'] = {}
+    
+    if not FMP_API_KEY or FMP_API_KEY == '':
+        results['api_key_check']['status'] = '❌ MISSING'
+        results['api_key_check']['message'] = 'FMP_API_KEY environment variable not set'
+        return jsonify(results), 500
+    else:
+        results['api_key_check']['status'] = '✅ PRESENT'
+        results['api_key_check']['length'] = len(FMP_API_KEY)
+        results['api_key_check']['preview'] = FMP_API_KEY[:8] + '...' if len(FMP_API_KEY) > 8 else FMP_API_KEY
+    
+    # ========================================================================
+    # TEST SPX DATA (^GSPC)
+    # ========================================================================
+    results['spx_tests'] = {}
+    
+    # Method 1: Quote (real-time price)
+    try:
+        print("  [TEST] Fetching SPX quote...")
+        quote_url = f"https://financialmodelingprep.com/api/v3/quote/%5EGSPC?apikey={FMP_API_KEY}"
+        quote_response = requests.get(quote_url, timeout=10)
+        
+        results['spx_tests']['quote_http_status'] = quote_response.status_code
+        
+        if quote_response.status_code == 200:
+            quote_data = quote_response.json()
+            results['spx_tests']['quote_response'] = quote_data
+            
+            if isinstance(quote_data, dict) and 'Error Message' in quote_data:
+                results['spx_tests']['quote_status'] = f"❌ ERROR: {quote_data['Error Message']}"
+            elif isinstance(quote_data, list) and len(quote_data) > 0:
+                spx_quote = quote_data[0]
+                if 'price' in spx_quote:
+                    results['spx_tests']['quote_status'] = '✅ SUCCESS'
+                    results['spx_tests']['spx_price'] = float(spx_quote['price'])
+                    results['spx_tests']['spx_high'] = float(spx_quote.get('dayHigh', 0))
+                    results['spx_tests']['spx_low'] = float(spx_quote.get('dayLow', 0))
+                    results['spx_tests']['spx_change'] = spx_quote.get('change', 0)
+                else:
+                    results['spx_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
+            else:
+                results['spx_tests']['quote_status'] = '❌ EMPTY OR INVALID RESPONSE'
+        else:
+            results['spx_tests']['quote_status'] = f'❌ HTTP ERROR {quote_response.status_code}'
+            results['spx_tests']['quote_error'] = quote_response.text[:200]
+    
+    except Exception as e:
+        results['spx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+        import traceback
+        results['spx_tests']['quote_traceback'] = traceback.format_exc()
+    
+    # Method 2: Historical data
+    try:
+        print("  [TEST] Fetching SPX historical data...")
+        hist_url = f"https://financialmodelingprep.com/api/v3/historical-price-full/%5EGSPC?apikey={FMP_API_KEY}"
+        hist_response = requests.get(hist_url, timeout=10)
+        
+        results['spx_tests']['historical_http_status'] = hist_response.status_code
+        
+        if hist_response.status_code == 200:
+            hist_data = hist_response.json()
+            
+            if 'Error Message' in hist_data:
+                results['spx_tests']['historical_status'] = f"❌ ERROR: {hist_data['Error Message']}"
+            elif 'historical' in hist_data:
+                results['spx_tests']['historical_status'] = '✅ SUCCESS'
+                results['spx_tests']['days_available'] = len(hist_data['historical'])
+                results['spx_tests']['latest_date'] = hist_data['historical'][0]['date'] if hist_data['historical'] else 'None'
+                results['spx_tests']['sample_data'] = hist_data['historical'][:2] if hist_data['historical'] else []
+            else:
+                results['spx_tests']['historical_status'] = '❌ UNEXPECTED FORMAT'
+        else:
+            results['spx_tests']['historical_status'] = f'❌ HTTP ERROR {hist_response.status_code}'
+    
+    except Exception as e:
+        results['spx_tests']['historical_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST VIX DATA
+    # ========================================================================
+    results['vix_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching VIX quote...")
+        vix_url = f"https://financialmodelingprep.com/api/v3/quote/%5EVIX?apikey={FMP_API_KEY}"
+        vix_response = requests.get(vix_url, timeout=10)
+        
+        results['vix_tests']['quote_http_status'] = vix_response.status_code
+        
+        if vix_response.status_code == 200:
+            vix_data = vix_response.json()
+            results['vix_tests']['quote_response'] = vix_data
+            
+            if isinstance(vix_data, dict) and 'Error Message' in vix_data:
+                results['vix_tests']['quote_status'] = f"❌ ERROR: {vix_data['Error Message']}"
+            elif isinstance(vix_data, list) and len(vix_data) > 0:
+                vix_quote = vix_data[0]
+                if 'price' in vix_quote:
+                    results['vix_tests']['quote_status'] = '✅ SUCCESS'
+                    results['vix_tests']['vix_value'] = float(vix_quote['price'])
+                else:
+                    results['vix_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
+            else:
+                results['vix_tests']['quote_status'] = '❌ EMPTY OR INVALID RESPONSE'
+        else:
+            results['vix_tests']['quote_status'] = f'❌ HTTP ERROR {vix_response.status_code}'
+    
+    except Exception as e:
+        results['vix_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST STOCK DATA (Control - AAPL)
+    # ========================================================================
+    results['control_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching AAPL quote (control test)...")
+        aapl_url = f"https://financialmodelingprep.com/api/v3/quote/AAPL?apikey={FMP_API_KEY}"
+        aapl_response = requests.get(aapl_url, timeout=10)
+        
+        if aapl_response.status_code == 200:
+            aapl_data = aapl_response.json()
+            
+            if isinstance(aapl_data, dict) and 'Error Message' in aapl_data:
+                results['control_tests']['AAPL'] = {'status': f"❌ ERROR: {aapl_data['Error Message']}"}
+            elif isinstance(aapl_data, list) and len(aapl_data) > 0 and 'price' in aapl_data[0]:
+                results['control_tests']['AAPL'] = {
+                    'status': '✅ SUCCESS',
+                    'price': float(aapl_data[0]['price'])
+                }
+            else:
+                results['control_tests']['AAPL'] = {'status': '❌ UNEXPECTED FORMAT'}
+        else:
+            results['control_tests']['AAPL'] = {'status': f'❌ HTTP {aapl_response.status_code}'}
+    
+    except Exception as e:
+        results['control_tests']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
+    
+    # ========================================================================
+    # API RATE LIMIT INFO
+    # ========================================================================
+    results['api_limits'] = {
+        'free_tier': '250 API calls per day',
+        'note': 'FMP free tier includes indices (SPX, VIX)',
+        'upgrade_info': 'Premium plans available at https://financialmodelingprep.com/developer/docs/pricing'
+    }
+    
+    # ========================================================================
+    # SUMMARY & RECOMMENDATION
+    # ========================================================================
+    spx_working = any('✅' in str(v) for v in results['spx_tests'].values())
+    vix_working = any('✅' in str(v) for v in results['vix_tests'].values())
+    stocks_working = any('✅' in str(v) for v in results['control_tests'].values())
+    
+    results['summary'] = {
+        'spx_working': spx_working,
+        'vix_working': vix_working,
+        'stocks_working': stocks_working
+    }
+    
+    if spx_working and vix_working:
+        results['recommendation'] = '✅ FMP WORKING - Bot ready to trade!'
+        results['status'] = 'READY'
+    elif stocks_working and not spx_working:
+        results['recommendation'] = '⚠️ Stocks work but indices (SPX/VIX) failed - Check symbol format or API limits'
+        results['status'] = 'INDICES_FAILED'
+        results['next_steps'] = 'Check FMP documentation for index symbols'
+    elif not stocks_working:
+        results['recommendation'] = '❌ API not working at all - Check API key'
+        results['status'] = 'API_FAILED'
+        results['next_steps'] = 'Verify API key at https://financialmodelingprep.com/developer/docs'
+    else:
+        results['recommendation'] = '⚠️ Mixed results - Check individual test details above'
+        results['status'] = 'MIXED'
+    
+    return jsonify(results), 200
 
 
 

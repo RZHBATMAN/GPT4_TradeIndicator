@@ -1391,6 +1391,228 @@ def poke_self():
             print(f"[POKE] Background error: {e}")
             time_module.sleep(60)
 
+
+############ TEST APIS ENDPOINTS ############
+
+
+
+
+@app.route("/test_twelve", methods=["GET"])
+def test_twelve():
+    """Test Twelve Data API - SPX, VIX, and controls"""
+    results = {
+        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production',
+        'api_provider': 'Twelve Data',
+        'api_website': 'https://twelvedata.com'
+    }
+    
+    # ========================================================================
+    # TEST TWELVE DATA API KEY
+    # ========================================================================
+    results['api_key_check'] = {}
+    
+    if not TWELVE_DATA_KEY or TWELVE_DATA_KEY == '':
+        results['api_key_check']['status'] = '❌ MISSING'
+        results['api_key_check']['message'] = 'TWELVE_DATA_KEY environment variable not set'
+        return jsonify(results), 500
+    else:
+        results['api_key_check']['status'] = '✅ PRESENT'
+        results['api_key_check']['length'] = len(TWELVE_DATA_KEY)
+        results['api_key_check']['preview'] = TWELVE_DATA_KEY[:8] + '...' if len(TWELVE_DATA_KEY) > 8 else TWELVE_DATA_KEY
+    
+    # ========================================================================
+    # TEST SPX DATA - Multiple methods
+    # ========================================================================
+    results['spx_tests'] = {}
+    
+    # Test 1: Quote endpoint
+    try:
+        print("  [TEST] Fetching SPX quote...")
+        quote_url = f"https://api.twelvedata.com/quote?symbol=SPX&apikey={TWELVE_DATA_KEY}"
+        quote_response = requests.get(quote_url, timeout=10)
+        
+        results['spx_tests']['quote_http_status'] = quote_response.status_code
+        
+        if quote_response.status_code == 200:
+            quote_data = quote_response.json()
+            results['spx_tests']['quote_response'] = quote_data
+            
+            if 'code' in quote_data:
+                if quote_data['code'] == 429:
+                    results['spx_tests']['quote_status'] = '❌ RATE LIMITED (429)'
+                elif quote_data['code'] == 401:
+                    results['spx_tests']['quote_status'] = '❌ UNAUTHORIZED (401) - Bad API key'
+                elif quote_data['code'] == 400:
+                    results['spx_tests']['quote_status'] = f"❌ BAD REQUEST (400): {quote_data.get('message', 'Unknown')}"
+                else:
+                    results['spx_tests']['quote_status'] = f"❌ ERROR {quote_data['code']}: {quote_data.get('message', 'Unknown')}"
+            elif 'close' in quote_data:
+                results['spx_tests']['quote_status'] = '✅ SUCCESS'
+                results['spx_tests']['spx_price'] = float(quote_data['close'])
+                results['spx_tests']['spx_high'] = float(quote_data['high'])
+                results['spx_tests']['spx_low'] = float(quote_data['low'])
+                results['spx_tests']['spx_volume'] = quote_data.get('volume', 'N/A')
+            else:
+                results['spx_tests']['quote_status'] = '❌ UNEXPECTED RESPONSE FORMAT'
+        else:
+            results['spx_tests']['quote_status'] = f'❌ HTTP ERROR {quote_response.status_code}'
+            results['spx_tests']['quote_error'] = quote_response.text[:200]
+    
+    except Exception as e:
+        results['spx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+        import traceback
+        results['spx_tests']['quote_traceback'] = traceback.format_exc()
+    
+    # Test 2: Time series endpoint (historical data)
+    try:
+        print("  [TEST] Fetching SPX time series...")
+        hist_url = f"https://api.twelvedata.com/time_series?symbol=SPX&interval=1day&outputsize=5&apikey={TWELVE_DATA_KEY}"
+        hist_response = requests.get(hist_url, timeout=10)
+        
+        results['spx_tests']['time_series_http_status'] = hist_response.status_code
+        
+        if hist_response.status_code == 200:
+            hist_data = hist_response.json()
+            results['spx_tests']['time_series_response'] = hist_data
+            
+            if 'code' in hist_data:
+                results['spx_tests']['time_series_status'] = f"❌ ERROR {hist_data['code']}: {hist_data.get('message', 'Unknown')}"
+            elif 'values' in hist_data:
+                results['spx_tests']['time_series_status'] = '✅ SUCCESS'
+                results['spx_tests']['days_returned'] = len(hist_data['values'])
+                results['spx_tests']['sample_data'] = hist_data['values'][:2] if len(hist_data['values']) > 0 else []
+            else:
+                results['spx_tests']['time_series_status'] = '❌ UNEXPECTED RESPONSE FORMAT'
+        else:
+            results['spx_tests']['time_series_status'] = f'❌ HTTP ERROR {hist_response.status_code}'
+    
+    except Exception as e:
+        results['spx_tests']['time_series_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST VIX DATA
+    # ========================================================================
+    results['vix_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching VIX quote...")
+        vix_url = f"https://api.twelvedata.com/quote?symbol=VIX&apikey={TWELVE_DATA_KEY}"
+        vix_response = requests.get(vix_url, timeout=10)
+        
+        results['vix_tests']['quote_http_status'] = vix_response.status_code
+        
+        if vix_response.status_code == 200:
+            vix_data = vix_response.json()
+            results['vix_tests']['quote_response'] = vix_data
+            
+            if 'code' in vix_data:
+                results['vix_tests']['quote_status'] = f"❌ ERROR {vix_data['code']}: {vix_data.get('message', 'Unknown')}"
+            elif 'close' in vix_data:
+                results['vix_tests']['quote_status'] = '✅ SUCCESS'
+                results['vix_tests']['vix_value'] = float(vix_data['close'])
+            else:
+                results['vix_tests']['quote_status'] = '❌ UNEXPECTED RESPONSE FORMAT'
+        else:
+            results['vix_tests']['quote_status'] = f'❌ HTTP ERROR {vix_response.status_code}'
+    
+    except Exception as e:
+        results['vix_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST STOCK DATA (Control - should definitely work)
+    # ========================================================================
+    results['control_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching AAPL quote (control test)...")
+        aapl_url = f"https://api.twelvedata.com/quote?symbol=AAPL&apikey={TWELVE_DATA_KEY}"
+        aapl_response = requests.get(aapl_url, timeout=10)
+        
+        if aapl_response.status_code == 200:
+            aapl_data = aapl_response.json()
+            
+            if 'code' in aapl_data:
+                results['control_tests']['AAPL'] = {
+                    'status': f"❌ ERROR {aapl_data['code']}",
+                    'message': aapl_data.get('message', 'Unknown')
+                }
+            elif 'close' in aapl_data:
+                results['control_tests']['AAPL'] = {
+                    'status': '✅ SUCCESS',
+                    'price': float(aapl_data['close'])
+                }
+            else:
+                results['control_tests']['AAPL'] = {'status': '❌ UNEXPECTED FORMAT'}
+        else:
+            results['control_tests']['AAPL'] = {'status': f'❌ HTTP {aapl_response.status_code}'}
+    
+    except Exception as e:
+        results['control_tests']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
+    
+    # ========================================================================
+    # TEST API RATE LIMIT STATUS
+    # ========================================================================
+    results['api_limits'] = {}
+    
+    try:
+        # Twelve Data returns rate limit info in headers
+        test_response = requests.get(
+            f"https://api.twelvedata.com/quote?symbol=SPY&apikey={TWELVE_DATA_KEY}",
+            timeout=10
+        )
+        
+        if 'X-RateLimit-Remaining' in test_response.headers:
+            results['api_limits']['calls_remaining'] = test_response.headers.get('X-RateLimit-Remaining')
+            results['api_limits']['rate_limit'] = test_response.headers.get('X-RateLimit-Limit')
+        else:
+            results['api_limits']['note'] = 'Rate limit headers not available'
+    
+    except Exception as e:
+        results['api_limits']['error'] = str(e)
+    
+    # ========================================================================
+    # SUMMARY & RECOMMENDATION
+    # ========================================================================
+    spx_working = any('✅' in str(v) for v in results['spx_tests'].values())
+    vix_working = any('✅' in str(v) for v in results['vix_tests'].values())
+    stocks_working = any('✅' in str(v) for v in results['control_tests'].values())
+    
+    results['summary'] = {
+        'spx_working': spx_working,
+        'vix_working': vix_working,
+        'stocks_working': stocks_working
+    }
+    
+    # Recommendation
+    if spx_working and vix_working:
+        results['recommendation'] = '✅ TWELVE DATA WORKING - Bot ready to trade!'
+        results['status'] = 'READY'
+    elif stocks_working and not spx_working:
+        results['recommendation'] = '⚠️ Stocks work but indices (SPX/VIX) blocked - Need different plan or upgrade'
+        results['status'] = 'INDICES_BLOCKED'
+        results['next_steps'] = 'Either upgrade Twelve Data plan OR try different API (Alpha Vantage, FMP, etc.)'
+    elif not stocks_working:
+        results['recommendation'] = '❌ API not working at all - Check API key or try different provider'
+        results['status'] = 'API_FAILED'
+        results['next_steps'] = 'Verify API key at https://twelvedata.com/account'
+    else:
+        results['recommendation'] = '⚠️ Mixed results - Check individual test details above'
+        results['status'] = 'MIXED'
+    
+    return jsonify(results), 200
+
+
+
+
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     

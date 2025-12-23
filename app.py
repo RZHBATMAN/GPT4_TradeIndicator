@@ -2158,7 +2158,137 @@ def test_fmp():
     
     return jsonify(results), 200
 
-
+@app.route("/test_marketstack", methods=["GET"])
+def test_marketstack():
+    """Test Marketstack API - SPX EOD data"""
+    results = {
+        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production',
+        'api_provider': 'Marketstack',
+        'api_website': 'https://marketstack.com'
+    }
+    
+    # Check API key
+    MARKETSTACK_KEY = os.environ.get('MARKETSTACK_KEY')
+    
+    results['api_key_check'] = {}
+    
+    if not MARKETSTACK_KEY:
+        results['api_key_check']['status'] = '❌ MISSING'
+        results['api_key_check']['message'] = 'MARKETSTACK_KEY environment variable not set'
+        return jsonify(results), 500
+    else:
+        results['api_key_check']['status'] = '✅ PRESENT'
+        results['api_key_check']['length'] = len(MARKETSTACK_KEY)
+        results['api_key_check']['preview'] = MARKETSTACK_KEY[:8] + '...'
+    
+    # ========================================================================
+    # TEST SPX (^GSPC) - End of Day data
+    # ========================================================================
+    results['spx_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching SPX EOD data...")
+        # Marketstack EOD endpoint
+        eod_url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols=^GSPC&limit=10"
+        eod_response = requests.get(eod_url, timeout=10)
+        
+        results['spx_tests']['eod_http_status'] = eod_response.status_code
+        
+        if eod_response.status_code == 200:
+            eod_data = eod_response.json()
+            results['spx_tests']['eod_response'] = eod_data
+            
+            if 'error' in eod_data:
+                results['spx_tests']['eod_status'] = f"❌ ERROR: {eod_data['error'].get('message', 'Unknown')}"
+            elif 'data' in eod_data and len(eod_data['data']) > 0:
+                results['spx_tests']['eod_status'] = '✅ SUCCESS'
+                results['spx_tests']['days_returned'] = len(eod_data['data'])
+                
+                latest = eod_data['data'][0]
+                results['spx_tests']['latest_date'] = latest['date']
+                results['spx_tests']['spx_close'] = latest['close']
+                results['spx_tests']['spx_high'] = latest['high']
+                results['spx_tests']['spx_low'] = latest['low']
+                results['spx_tests']['spx_volume'] = latest['volume']
+                
+                # Sample historical closes for RV
+                closes = [d['close'] for d in eod_data['data']]
+                results['spx_tests']['sample_closes'] = closes[:5]
+            else:
+                results['spx_tests']['eod_status'] = '❌ NO DATA'
+        else:
+            results['spx_tests']['eod_status'] = f'❌ HTTP ERROR {eod_response.status_code}'
+            results['spx_tests']['error_text'] = eod_response.text[:200]
+    
+    except Exception as e:
+        results['spx_tests']['eod_status'] = f'❌ EXCEPTION: {str(e)}'
+        import traceback
+        results['spx_tests']['traceback'] = traceback.format_exc()
+    
+    # ========================================================================
+    # TEST AAPL (control - stocks should definitely work)
+    # ========================================================================
+    results['control_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching AAPL data (control)...")
+        aapl_url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols=AAPL&limit=5"
+        aapl_response = requests.get(aapl_url, timeout=10)
+        
+        if aapl_response.status_code == 200:
+            aapl_data = aapl_response.json()
+            
+            if 'error' in aapl_data:
+                results['control_tests']['AAPL'] = {'status': f"❌ ERROR: {aapl_data['error'].get('message', 'Unknown')}"}
+            elif 'data' in aapl_data and len(aapl_data['data']) > 0:
+                results['control_tests']['AAPL'] = {
+                    'status': '✅ SUCCESS',
+                    'price': aapl_data['data'][0]['close'],
+                    'date': aapl_data['data'][0]['date']
+                }
+            else:
+                results['control_tests']['AAPL'] = {'status': '❌ NO DATA'}
+        else:
+            results['control_tests']['AAPL'] = {'status': f'❌ HTTP {aapl_response.status_code}'}
+    
+    except Exception as e:
+        results['control_tests']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
+    
+    # ========================================================================
+    # API LIMITS
+    # ========================================================================
+    results['api_limits'] = {
+        'free_tier': '100 API requests per month',
+        'data_type': 'End-of-Day (EOD) only on free tier',
+        'note': 'Intraday data requires paid plan',
+        'upgrade_info': 'https://marketstack.com/product'
+    }
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    spx_working = '✅' in results['spx_tests'].get('eod_status', '')
+    stocks_working = '✅' in results['control_tests'].get('AAPL', {}).get('status', '')
+    
+    results['summary'] = {
+        'spx_working': spx_working,
+        'stocks_working': stocks_working
+    }
+    
+    if spx_working:
+        results['recommendation'] = '✅ MARKETSTACK WORKING - Can use EOD data for bot'
+        results['status'] = 'READY'
+        results['note'] = 'Free tier = EOD only. For intraday, consider paid plan or estimate from EOD + market movement'
+    elif stocks_working:
+        results['recommendation'] = '⚠️ Stocks work but SPX failed - Check symbol format'
+        results['status'] = 'SPX_FAILED'
+    else:
+        results['recommendation'] = '❌ Marketstack not working - Check API key'
+        results['status'] = 'FAILED'
+        results['next_steps'] = 'Get API key at https://marketstack.com/signup/free'
+    
+    return jsonify(results), 200
 
 
 if __name__ == "__main__":

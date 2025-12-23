@@ -3,7 +3,7 @@
 SPX Overnight Vol Premium Bot - Railway Production (No feedparser)
 Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
 Uses direct HTTP + XML parsing instead of feedparser
-UPDATED: Proper 1-day IV/RV ratio calculation
+UPDATED: Proper 1-day IV/RV + Retry logic for Yahoo Finance API
 """
 
 from flask import Flask, jsonify
@@ -55,6 +55,25 @@ WEBHOOK_URLS = {
     'TRADE_CONSERVATIVE': CONFIG.get('TRADE_CONSERVATIVE_URL'),
     'NO_TRADE': CONFIG.get('NO_TRADE_URL')
 }
+
+# ============================================================================
+# YFINANCE SESSION - Prevent Yahoo blocking
+# ============================================================================
+
+def create_yfinance_session():
+    """Create a session with headers to avoid Yahoo blocking"""
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+    })
+    return session
+
+# Global session (reuse across requests)
+YF_SESSION = create_yfinance_session()
 
 # ============================================================================
 # LAYER 1: ALGO DEDUPLICATION - Strong fuzzy matching
@@ -422,45 +441,110 @@ def fetch_news_multi_source():
         }
 
 # ============================================================================
-# DATA FETCHING
+# DATA FETCHING - WITH RETRY LOGIC
 # ============================================================================
 
-def get_spx_data():
-    """Fetch SPX data from Yahoo Finance - Robust for market hours"""
-    try:
-        spx = yf.Ticker("^GSPC")
-        
-        # Get current/real-time price
+def get_spx_data_with_retry(max_retries=3):
+    """Fetch SPX data with retry logic"""
+    for attempt in range(max_retries):
         try:
-            # Try fast_info first (most reliable for current price)
-            current_price = spx.fast_info['lastPrice']
-        except:
-            # Fallback: Get last available price from recent history
-            recent = spx.history(period="2d", interval="1m")
-            if recent.empty:
-                print("  ERROR: Cannot get current SPX price")
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching SPX data...")
+            
+            result = get_spx_data()
+            
+            if result is not None:
+                print(f"  ✅ SPX fetch succeeded on attempt {attempt + 1}")
+                return result
+            
+            print(f"  ⚠️ Attempt {attempt + 1} returned None, retrying...")
+            time_module.sleep(2)  # Wait 2 seconds before retry
+            
+        except Exception as e:
+            print(f"  ❌ Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time_module.sleep(2)
+            else:
+                print(f"  ❌ All {max_retries} attempts failed")
                 return None
-            current_price = recent['Close'].iloc[-1]
+    
+    return None
+
+def get_spx_data():
+    """Fetch SPX data from Yahoo Finance - With session and error handling"""
+    try:
+        # Use session to avoid blocking
+        spx = yf.Ticker("^GSPC", session=YF_SESSION)
         
-        # Get intraday high/low (today's range)
-        intraday = spx.history(period="1d", interval="5m")
-        if not intraday.empty and len(intraday) > 0:
-            high_today = intraday['High'].max()
-            low_today = intraday['Low'].min()
-        else:
-            # Market hasn't moved yet or data unavailable - use current as both
+        current_price = None
+        
+        # METHOD 1: Try history with 5 days (most reliable)
+        try:
+            print("  [Method 1] Trying history(period='5d')...")
+            history_5d = spx.history(period="5d")
+            
+            if not history_5d.empty and len(history_5d) > 0:
+                current_price = float(history_5d['Close'].iloc[-1])
+                print(f"  ✅ Method 1 success: {current_price:.2f}")
+        except Exception as e:
+            print(f"  ❌ Method 1 failed: {e}")
+        
+        # METHOD 2: Try fast_info if Method 1 failed
+        if current_price is None:
+            try:
+                print("  [Method 2] Trying fast_info...")
+                current_price = float(spx.fast_info['lastPrice'])
+                print(f"  ✅ Method 2 success: {current_price:.2f}")
+            except Exception as e:
+                print(f"  ❌ Method 2 failed: {e}")
+        
+        # METHOD 3: Try info as last resort
+        if current_price is None:
+            try:
+                print("  [Method 3] Trying info...")
+                info = spx.info
+                current_price = info.get('regularMarketPrice') or info.get('currentPrice')
+                if current_price:
+                    current_price = float(current_price)
+                    print(f"  ✅ Method 3 success: {current_price:.2f}")
+            except Exception as e:
+                print(f"  ❌ Method 3 failed: {e}")
+        
+        if current_price is None or current_price <= 0:
+            print(f"  ❌ ERROR: Could not get valid SPX price")
+            return None
+        
+        # Get intraday high/low (use 5-day history if available)
+        try:
+            if 'history_5d' in locals() and not history_5d.empty:
+                # Get today's data from 5-day history
+                today_data = history_5d.tail(1)
+                high_today = float(today_data['High'].iloc[-1])
+                low_today = float(today_data['Low'].iloc[-1])
+            else:
+                high_today = current_price
+                low_today = current_price
+        except Exception as e:
+            print(f"  ⚠️ Could not get high/low: {e}")
             high_today = current_price
             low_today = current_price
         
-        # Get historical daily closes (for RV calculation)
-        history = spx.history(period="15d", interval="1d")
-        if history.empty or len(history) < 6:
-            print("  ERROR: Insufficient historical data")
+        # Get historical daily closes (15 days)
+        try:
+            print("  [Getting historical data]...")
+            history = spx.history(period="15d")
+            
+            if history.empty or len(history) < 6:
+                print(f"  ❌ ERROR: Insufficient historical data (got {len(history)} days)")
+                return None
+            
+            closes = history['Close'].values
+            print(f"  ✅ Got {len(closes)} days of historical data")
+            
+        except Exception as e:
+            print(f"  ❌ ERROR: Could not get historical data: {e}")
             return None
         
-        closes = history['Close'].values
-        
-        print(f"  ✅ SPX: Current={current_price:.2f}, High={high_today:.2f}, Low={low_today:.2f}")
+        print(f"  ✅ SPX SUCCESS: Current={current_price:.2f}, High={high_today:.2f}, Low={low_today:.2f}")
         
         return {
             'current': float(current_price),
@@ -470,36 +554,74 @@ def get_spx_data():
         }
         
     except Exception as e:
-        print(f"  ❌ ERROR fetching SPX: {e}")
+        print(f"  ❌ CRITICAL ERROR in get_spx_data: {e}")
         import traceback
         traceback.print_exc()
         return None
 
+def get_overnight_iv_with_retry(max_retries=3):
+    """Fetch VIX1D with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VIX1D...")
+            
+            result = get_overnight_iv()
+            
+            if result is not None:
+                print(f"  ✅ VIX1D fetch succeeded on attempt {attempt + 1}")
+                return result
+            
+            print(f"  ⚠️ Attempt {attempt + 1} returned None, retrying...")
+            time_module.sleep(2)
+            
+        except Exception as e:
+            print(f"  ❌ Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time_module.sleep(2)
+            else:
+                print(f"  ❌ All {max_retries} attempts failed")
+                return None
+    
+    return None
+
 def get_overnight_iv():
-    """
-    Get overnight IV from VIX1D directly
-    Returns None on any failure (including empty data)
-    """
+    """Get overnight IV from VIX1D with session"""
     try:
-        print("  [Fetching VIX1D (1-day IV ticker)...]")
-        vix1d = yf.Ticker("^VIX1D")
-        data = vix1d.history(period="1d")
+        # Use session to avoid blocking
+        vix1d = yf.Ticker("^VIX1D", session=YF_SESSION)
         
-        # Check if data is empty or invalid
-        if data.empty or len(data) == 0:
-            print("  ❌ ERROR: VIX1D returned empty data")
+        iv_value = None
+        
+        # METHOD 1: Try history
+        try:
+            print("  [VIX Method 1] Trying history(period='5d')...")
+            data = vix1d.history(period="5d")
+            
+            if not data.empty and len(data) > 0:
+                iv_value = float(data['Close'].iloc[-1])
+                print(f"  ✅ VIX Method 1 success: {iv_value:.2f}")
+        except Exception as e:
+            print(f"  ❌ VIX Method 1 failed: {e}")
+        
+        # METHOD 2: Try fast_info
+        if iv_value is None:
+            try:
+                print("  [VIX Method 2] Trying fast_info...")
+                iv_value = float(vix1d.fast_info['lastPrice'])
+                print(f"  ✅ VIX Method 2 success: {iv_value:.2f}")
+            except Exception as e:
+                print(f"  ❌ VIX Method 2 failed: {e}")
+        
+        if iv_value is None:
+            print("  ❌ ERROR: Could not get VIX1D value")
             return None
         
-        # Extract IV value
-        iv_value = float(data['Close'].iloc[-1])
-        
-        # Sanity check (VIX1D should be between 5-100%)
+        # Sanity check
         if iv_value < 5 or iv_value > 100:
-            print(f"  ❌ ERROR: VIX1D value {iv_value:.2f}% is outside normal range (5-100%)")
+            print(f"  ❌ ERROR: VIX1D value {iv_value:.2f}% outside normal range")
             return None
         
-        # Success!
-        print(f"  ✅ VIX1D = {iv_value:.2f}%")
+        print(f"  ✅ VIX1D SUCCESS: {iv_value:.2f}%")
         
         return {
             'current': iv_value,
@@ -507,9 +629,11 @@ def get_overnight_iv():
             'source': 'VIX1D_direct',
             'method': 'Direct ticker fetch'
         }
-            
+        
     except Exception as e:
-        print(f"  ❌ ERROR: VIX1D fetch failed - {str(e)}")
+        print(f"  ❌ CRITICAL ERROR in get_overnight_iv: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # ============================================================================
@@ -1126,7 +1250,7 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">IV Source:</span>
-                    <span class="info-value">VIX1D (1-day tenor)</span>
+                    <span class="info-value">VIX1D (1-day tenor) with retry logic</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">News Parsing:</span>
@@ -1155,7 +1279,7 @@ def health_check():
         "environment": "production",
         "trading_window": "2:30-3:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
-        "iv_source": "VIX1D (1-day tenor)",
+        "iv_source": "VIX1D (1-day tenor) with retry",
         "news_parser": "Direct HTTP + XML (No feedparser)"
     }), 200
 
@@ -1178,16 +1302,14 @@ def option_alpha_trigger():
     try:
         print(f"[{timestamp}] Fetching market data...")
         
-        spx_data = get_spx_data()
+        # Use retry versions
+        spx_data = get_spx_data_with_retry(max_retries=3)
         if not spx_data:
-            return jsonify({"status": "error", "message": "SPX failed"}), 500
+            return jsonify({"status": "error", "message": "SPX failed after 3 retries"}), 500
         
-        iv_data = get_overnight_iv()
+        iv_data = get_overnight_iv_with_retry(max_retries=3)
         if not iv_data:
-            return jsonify({
-                "status": "error", 
-                "message": "Failed to get overnight IV (VIX1D failed)"
-            }), 500
+            return jsonify({"status": "error", "message": "VIX1D failed after 3 retries"}), 500
         
         # Fetch news
         news_data = fetch_news_multi_source()
@@ -1344,11 +1466,11 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     
     print("=" * 80)
-    print("Ren's SPX Vol Signal - Production (Nuclear + 1-Day IV/RV)")
+    print("Ren's SPX Vol Signal - Production (Nuclear + 1-Day IV/RV + Retry)")
     print("=" * 80)
     print(f"Port: {PORT}")
     print(f"Trading Window: 2:30-3:30 PM ET")
-    print(f"IV Source: VIX1D (1-day tenor)")
+    print(f"IV Source: VIX1D (1-day tenor) with retry logic")
     print(f"News Parser: Direct HTTP + XML (No feedparser)")
     print("=" * 80)
     

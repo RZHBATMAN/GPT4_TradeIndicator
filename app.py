@@ -1408,6 +1408,81 @@ def poke_self():
             print(f"[POKE] Background error: {e}")
             time_module.sleep(60)
 
+@app.route("/test_yahoo", methods=["GET"])
+def test_yahoo():
+    """Test Yahoo Finance directly"""
+    results = {}
+    
+    # Test 1: Import yfinance
+    try:
+        import yfinance as yf
+        results['yfinance_version'] = yf.__version__
+        results['yfinance_import'] = 'SUCCESS'
+    except Exception as e:
+        results['yfinance_import'] = f'FAILED: {str(e)}'
+        return jsonify(results), 500
+    
+    # Test 2: Create session with headers
+    try:
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        })
+        results['session_created'] = 'SUCCESS'
+    except Exception as e:
+        results['session_created'] = f'FAILED: {str(e)}'
+    
+    # Test 3: Try SPX with session
+    try:
+        spx = yf.Ticker("^GSPC", session=session)
+        results['ticker_created'] = 'SUCCESS'
+    except Exception as e:
+        results['ticker_created'] = f'FAILED: {str(e)}'
+        return jsonify(results), 500
+    
+    # Test 4: Try history
+    try:
+        hist = spx.history(period="5d")
+        results['history_call'] = 'SUCCESS'
+        results['history_length'] = len(hist)
+        if not hist.empty:
+            results['latest_close'] = float(hist['Close'].iloc[-1])
+        else:
+            results['history_empty'] = True
+    except Exception as e:
+        results['history_call'] = f'FAILED: {str(e)}'
+    
+    # Test 5: Try fast_info
+    try:
+        price = spx.fast_info['lastPrice']
+        results['fast_info_call'] = 'SUCCESS'
+        results['fast_info_price'] = float(price)
+    except Exception as e:
+        results['fast_info_call'] = f'FAILED: {str(e)}'
+    
+    # Test 6: Try info
+    try:
+        info = spx.info
+        price = info.get('regularMarketPrice') or info.get('currentPrice')
+        results['info_call'] = 'SUCCESS'
+        results['info_price'] = float(price) if price else None
+    except Exception as e:
+        results['info_call'] = f'FAILED: {str(e)}'
+    
+    # Test 7: Try VIX
+    try:
+        vix = yf.Ticker("^VIX", session=session)
+        vix_hist = vix.history(period="5d")
+        results['vix_call'] = 'SUCCESS'
+        results['vix_length'] = len(vix_hist)
+        if not vix_hist.empty:
+            results['vix_close'] = float(vix_hist['Close'].iloc[-1])
+    except Exception as e:
+        results['vix_call'] = f'FAILED: {str(e)}'
+    
+    return jsonify(results), 200
+
+
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     

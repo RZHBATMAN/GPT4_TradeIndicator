@@ -2158,9 +2158,9 @@ def test_fmp():
     
     return jsonify(results), 200
 
-@app.route("/test_marketstack", methods=["GET"])
-def test_marketstack():
-    """Test Marketstack API - SPX EOD data"""
+@app.route("/test_marketstack_all", methods=["GET"])
+def test_marketstack_all():
+    """Test all possible SPX and VIX symbol formats on Marketstack"""
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
         'environment': 'Railway Production',
@@ -2168,125 +2168,186 @@ def test_marketstack():
         'api_website': 'https://marketstack.com'
     }
     
-    # Check API key
     MARKETSTACK_KEY = os.environ.get('MARKETSTACK_KEY')
     
-    results['api_key_check'] = {}
-    
     if not MARKETSTACK_KEY:
-        results['api_key_check']['status'] = '❌ MISSING'
-        results['api_key_check']['message'] = 'MARKETSTACK_KEY environment variable not set'
-        return jsonify(results), 500
-    else:
-        results['api_key_check']['status'] = '✅ PRESENT'
-        results['api_key_check']['length'] = len(MARKETSTACK_KEY)
-        results['api_key_check']['preview'] = MARKETSTACK_KEY[:8] + '...'
+        return jsonify({'error': 'MARKETSTACK_KEY not set'}), 500
+    
+    results['api_key_check'] = {
+        'status': '✅ PRESENT',
+        'length': len(MARKETSTACK_KEY),
+        'preview': MARKETSTACK_KEY[:8] + '...'
+    }
     
     # ========================================================================
-    # TEST SPX (^GSPC) - End of Day data
+    # TEST SPX SYMBOLS - Try multiple formats
     # ========================================================================
-    results['spx_tests'] = {}
+    spx_symbols = [
+        'SPX',           # Without caret
+        '^GSPC',         # Yahoo format
+        'GSPC',          # Without caret
+        '.SPX',          # Dot notation
+        'INX',           # Alternative SPX code
+        '$SPX',          # Dollar notation
+        'SPX.INDX',      # With exchange suffix
+        'SPX.US',        # US exchange
+    ]
     
-    try:
-        print("  [TEST] Fetching SPX EOD data...")
-        # Marketstack EOD endpoint
-        eod_url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols=^GSPC&limit=10"
-        eod_response = requests.get(eod_url, timeout=10)
-        
-        results['spx_tests']['eod_http_status'] = eod_response.status_code
-        
-        if eod_response.status_code == 200:
-            eod_data = eod_response.json()
-            results['spx_tests']['eod_response'] = eod_data
+    results['spx_symbol_tests'] = {}
+    
+    for symbol in spx_symbols:
+        try:
+            print(f"  [TEST SPX] Trying: {symbol}")
+            url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols={symbol}&limit=5"
+            response = requests.get(url, timeout=10)
             
-            if 'error' in eod_data:
-                results['spx_tests']['eod_status'] = f"❌ ERROR: {eod_data['error'].get('message', 'Unknown')}"
-            elif 'data' in eod_data and len(eod_data['data']) > 0:
-                results['spx_tests']['eod_status'] = '✅ SUCCESS'
-                results['spx_tests']['days_returned'] = len(eod_data['data'])
+            results['spx_symbol_tests'][symbol] = {
+                'http_status': response.status_code
+            }
+            
+            if response.status_code == 200:
+                data = response.json()
                 
-                latest = eod_data['data'][0]
-                results['spx_tests']['latest_date'] = latest['date']
-                results['spx_tests']['spx_close'] = latest['close']
-                results['spx_tests']['spx_high'] = latest['high']
-                results['spx_tests']['spx_low'] = latest['low']
-                results['spx_tests']['spx_volume'] = latest['volume']
-                
-                # Sample historical closes for RV
-                closes = [d['close'] for d in eod_data['data']]
-                results['spx_tests']['sample_closes'] = closes[:5]
+                if 'error' in data:
+                    results['spx_symbol_tests'][symbol]['status'] = f"❌ ERROR: {data['error'].get('message', 'Unknown')}"
+                elif 'data' in data and len(data['data']) > 0:
+                    results['spx_symbol_tests'][symbol]['status'] = '✅ SUCCESS'
+                    results['spx_symbol_tests'][symbol]['latest_close'] = data['data'][0]['close']
+                    results['spx_symbol_tests'][symbol]['latest_date'] = data['data'][0]['date']
+                    results['spx_symbol_tests'][symbol]['days_returned'] = len(data['data'])
+                    
+                    # Get closes for RV calculation
+                    closes = [d['close'] for d in data['data']]
+                    results['spx_symbol_tests'][symbol]['sample_closes'] = closes
+                else:
+                    results['spx_symbol_tests'][symbol]['status'] = '❌ NO DATA'
             else:
-                results['spx_tests']['eod_status'] = '❌ NO DATA'
-        else:
-            results['spx_tests']['eod_status'] = f'❌ HTTP ERROR {eod_response.status_code}'
-            results['spx_tests']['error_text'] = eod_response.text[:200]
-    
-    except Exception as e:
-        results['spx_tests']['eod_status'] = f'❌ EXCEPTION: {str(e)}'
-        import traceback
-        results['spx_tests']['traceback'] = traceback.format_exc()
+                results['spx_symbol_tests'][symbol]['status'] = f'❌ HTTP {response.status_code}'
+                results['spx_symbol_tests'][symbol]['error'] = response.text[:200]
+        
+        except Exception as e:
+            results['spx_symbol_tests'][symbol]['status'] = f'❌ EXCEPTION: {str(e)}'
     
     # ========================================================================
-    # TEST AAPL (control - stocks should definitely work)
+    # TEST VIX SYMBOLS - Try multiple formats
     # ========================================================================
-    results['control_tests'] = {}
+    vix_symbols = [
+        'VIX',           # Without caret
+        '^VIX',          # Yahoo format
+        '.VIX',          # Dot notation
+        '$VIX',          # Dollar notation
+        'VIX.INDX',      # With exchange suffix
+        'VIX.US',        # US exchange
+        'VIXCLS',        # FRED style
+    ]
+    
+    results['vix_symbol_tests'] = {}
+    
+    for symbol in vix_symbols:
+        try:
+            print(f"  [TEST VIX] Trying: {symbol}")
+            url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols={symbol}&limit=5"
+            response = requests.get(url, timeout=10)
+            
+            results['vix_symbol_tests'][symbol] = {
+                'http_status': response.status_code
+            }
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if 'error' in data:
+                    results['vix_symbol_tests'][symbol]['status'] = f"❌ ERROR: {data['error'].get('message', 'Unknown')}"
+                elif 'data' in data and len(data['data']) > 0:
+                    results['vix_symbol_tests'][symbol]['status'] = '✅ SUCCESS'
+                    results['vix_symbol_tests'][symbol]['vix_value'] = data['data'][0]['close']
+                    results['vix_symbol_tests'][symbol]['latest_date'] = data['data'][0]['date']
+                else:
+                    results['vix_symbol_tests'][symbol]['status'] = '❌ NO DATA'
+            else:
+                results['vix_symbol_tests'][symbol]['status'] = f'❌ HTTP {response.status_code}'
+                results['vix_symbol_tests'][symbol]['error'] = response.text[:200]
+        
+        except Exception as e:
+            results['vix_symbol_tests'][symbol]['status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # CONTROL TEST - AAPL (should always work)
+    # ========================================================================
+    results['control_test'] = {}
     
     try:
-        print("  [TEST] Fetching AAPL data (control)...")
-        aapl_url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols=AAPL&limit=5"
-        aapl_response = requests.get(aapl_url, timeout=10)
+        print(f"  [TEST CONTROL] AAPL...")
+        url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols=AAPL&limit=5"
+        response = requests.get(url, timeout=10)
         
-        if aapl_response.status_code == 200:
-            aapl_data = aapl_response.json()
-            
-            if 'error' in aapl_data:
-                results['control_tests']['AAPL'] = {'status': f"❌ ERROR: {aapl_data['error'].get('message', 'Unknown')}"}
-            elif 'data' in aapl_data and len(aapl_data['data']) > 0:
-                results['control_tests']['AAPL'] = {
+        if response.status_code == 200:
+            data = response.json()
+            if 'data' in data and len(data['data']) > 0:
+                results['control_test']['AAPL'] = {
                     'status': '✅ SUCCESS',
-                    'price': aapl_data['data'][0]['close'],
-                    'date': aapl_data['data'][0]['date']
+                    'price': data['data'][0]['close'],
+                    'date': data['data'][0]['date']
                 }
             else:
-                results['control_tests']['AAPL'] = {'status': '❌ NO DATA'}
+                results['control_test']['AAPL'] = {'status': '❌ NO DATA'}
         else:
-            results['control_tests']['AAPL'] = {'status': f'❌ HTTP {aapl_response.status_code}'}
-    
+            results['control_test']['AAPL'] = {'status': f'❌ HTTP {response.status_code}'}
     except Exception as e:
-        results['control_tests']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
+        results['control_test']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
     
     # ========================================================================
-    # API LIMITS
+    # SUMMARY & RECOMMENDATION
     # ========================================================================
-    results['api_limits'] = {
-        'free_tier': '100 API requests per month',
-        'data_type': 'End-of-Day (EOD) only on free tier',
-        'note': 'Intraday data requires paid plan',
-        'upgrade_info': 'https://marketstack.com/product'
-    }
-    
-    # ========================================================================
-    # SUMMARY
-    # ========================================================================
-    spx_working = '✅' in results['spx_tests'].get('eod_status', '')
-    stocks_working = '✅' in results['control_tests'].get('AAPL', {}).get('status', '')
+    working_spx = [sym for sym, data in results['spx_symbol_tests'].items() if '✅' in data.get('status', '')]
+    working_vix = [sym for sym, data in results['vix_symbol_tests'].items() if '✅' in data.get('status', '')]
+    stocks_working = '✅' in results['control_test'].get('AAPL', {}).get('status', '')
     
     results['summary'] = {
-        'spx_working': spx_working,
-        'stocks_working': stocks_working
+        'working_spx_symbols': working_spx,
+        'working_vix_symbols': working_vix,
+        'stocks_working': stocks_working,
+        'spx_found': len(working_spx) > 0,
+        'vix_found': len(working_vix) > 0
     }
     
-    if spx_working:
-        results['recommendation'] = '✅ MARKETSTACK WORKING - Can use EOD data for bot'
+    # Final recommendation
+    if working_spx and working_vix:
+        results['recommendation'] = f"✅ MARKETSTACK READY! Use SPX={working_spx[0]}, VIX={working_vix[0]}"
         results['status'] = 'READY'
-        results['note'] = 'Free tier = EOD only. For intraday, consider paid plan or estimate from EOD + market movement'
+        results['best_symbols'] = {
+            'spx': working_spx[0],
+            'vix': working_vix[0]
+        }
+    elif working_spx and not working_vix:
+        results['recommendation'] = f"⚠️ SPX works ({working_spx[0]}) but VIX failed - Need alternative VIX source"
+        results['status'] = 'SPX_ONLY'
+        results['best_symbols'] = {
+            'spx': working_spx[0],
+            'vix': None
+        }
+    elif not working_spx and working_vix:
+        results['recommendation'] = f"⚠️ VIX works ({working_vix[0]}) but SPX failed - Need alternative SPX source"
+        results['status'] = 'VIX_ONLY'
+        results['best_symbols'] = {
+            'spx': None,
+            'vix': working_vix[0]
+        }
     elif stocks_working:
-        results['recommendation'] = '⚠️ Stocks work but SPX failed - Check symbol format'
-        results['status'] = 'SPX_FAILED'
+        results['recommendation'] = '❌ Indices not available on Marketstack free tier - Only stocks work'
+        results['status'] = 'INDICES_BLOCKED'
+        results['note'] = 'Marketstack free tier likely does not include index data (SPX, VIX)'
+        results['alternatives'] = 'Either upgrade Marketstack OR use paid API (Polygon, Alpha Vantage Premium, etc.)'
     else:
-        results['recommendation'] = '❌ Marketstack not working - Check API key'
+        results['recommendation'] = '❌ Marketstack API not working at all'
         results['status'] = 'FAILED'
-        results['next_steps'] = 'Get API key at https://marketstack.com/signup/free'
+    
+    # API limits reminder
+    results['api_limits'] = {
+        'free_tier': '100 API requests per month',
+        'data_type': 'End-of-Day (EOD) only',
+        'note': 'If indices not available, may need paid plan'
+    }
     
     return jsonify(results), 200
 

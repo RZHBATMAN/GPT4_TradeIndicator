@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-SPX Overnight Vol Premium Bot - Railway Production (No feedparser)
+SPX Overnight Vol Premium Bot - Railway Production (Polygon.io)
 Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
-Uses direct HTTP + XML parsing instead of feedparser
-UPDATED: Proper 1-day IV/RV + Retry logic for Yahoo Finance API
+Uses Polygon.io for market data (more reliable than Yahoo Finance)
 """
 
 from flask import Flask, jsonify
@@ -12,7 +11,6 @@ import math
 import requests
 from datetime import datetime, timedelta, time as dt_time
 import pytz
-import yfinance as yf
 import os
 import threading
 import time as time_module
@@ -28,12 +26,13 @@ ET_TZ = pytz.timezone('US/Eastern')
 
 # Trading windows - PRODUCTION: 2:30-3:30 PM ET
 TRADING_WINDOW_START = dt_time(hour=14, minute=30)
-TRADING_WINDOW_END = dt_time(hour=15, minute=30)
+TRADING_WINDOW_END = dt_time(hour=16, minute=30)
 
 def load_config():
     """Load configuration from environment variables (Railway)"""
     config = {
         'OPENAI_API_KEY': os.environ.get('OPENAI_API_KEY'),
+        'POLYGON_API_KEY': os.environ.get('POLYGON_API_KEY'),
         'TRADE_AGGRESSIVE_URL': os.environ.get('TRADE_AGGRESSIVE_URL'),
         'TRADE_NORMAL_URL': os.environ.get('TRADE_NORMAL_URL'),
         'TRADE_CONSERVATIVE_URL': os.environ.get('TRADE_CONSERVATIVE_URL'),
@@ -48,6 +47,7 @@ def load_config():
 
 CONFIG = load_config()
 OPENAI_API_KEY = CONFIG.get('OPENAI_API_KEY')
+POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 
 WEBHOOK_URLS = {
     'TRADE_AGGRESSIVE': CONFIG.get('TRADE_AGGRESSIVE_URL'),
@@ -55,25 +55,6 @@ WEBHOOK_URLS = {
     'TRADE_CONSERVATIVE': CONFIG.get('TRADE_CONSERVATIVE_URL'),
     'NO_TRADE': CONFIG.get('NO_TRADE_URL')
 }
-
-# ============================================================================
-# YFINANCE SESSION - Prevent Yahoo blocking
-# ============================================================================
-
-def create_yfinance_session():
-    """Create a session with headers to avoid Yahoo blocking"""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
-    })
-    return session
-
-# Global session (reuse across requests)
-YF_SESSION = create_yfinance_session()
 
 # ============================================================================
 # LAYER 1: ALGO DEDUPLICATION - Strong fuzzy matching
@@ -441,200 +422,166 @@ def fetch_news_multi_source():
         }
 
 # ============================================================================
-# DATA FETCHING - WITH RETRY LOGIC
+# DATA FETCHING - POLYGON.IO (More reliable than Yahoo)
 # ============================================================================
 
+def get_spx_data_polygon():
+    """Fetch SPX data from Polygon.io - More reliable than Yahoo"""
+    try:
+        print("  [Polygon] Fetching SPX data...")
+        
+        # Get current quote (real-time)
+        quote_url = f"https://api.polygon.io/v2/last/trade/I:SPX?apiKey={POLYGON_API_KEY}"
+        quote_response = requests.get(quote_url, timeout=10)
+        
+        if quote_response.status_code != 200:
+            print(f"  ❌ Polygon quote failed: {quote_response.status_code}")
+            return None
+        
+        quote_data = quote_response.json()
+        
+        if 'results' not in quote_data:
+            print(f"  ❌ No results in quote data")
+            return None
+        
+        current_price = float(quote_data['results']['p'])
+        print(f"  ✅ Current SPX: {current_price:.2f}")
+        
+        # Get today's OHLC
+        today = datetime.now(ET_TZ).strftime('%Y-%m-%d')
+        today_url = f"https://api.polygon.io/v2/aggs/ticker/I:SPX/range/1/day/{today}/{today}?adjusted=true&sort=desc&apiKey={POLYGON_API_KEY}"
+        today_response = requests.get(today_url, timeout=10)
+        
+        if today_response.status_code == 200:
+            today_data = today_response.json()
+            if 'results' in today_data and len(today_data['results']) > 0:
+                high_today = float(today_data['results'][0]['h'])
+                low_today = float(today_data['results'][0]['l'])
+                print(f"  ✅ Today's range: High={high_today:.2f}, Low={low_today:.2f}")
+            else:
+                high_today = current_price
+                low_today = current_price
+        else:
+            high_today = current_price
+            low_today = current_price
+        
+        # Get historical data (last 25 days to ensure 15+ trading days)
+        end_date = datetime.now(ET_TZ)
+        start_date = end_date - timedelta(days=25)
+        
+        hist_url = f"https://api.polygon.io/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&apiKey={POLYGON_API_KEY}"
+        hist_response = requests.get(hist_url, timeout=10)
+        
+        if hist_response.status_code != 200:
+            print(f"  ❌ Polygon history failed: {hist_response.status_code}")
+            return None
+        
+        hist_data = hist_response.json()
+        
+        if 'results' not in hist_data or len(hist_data['results']) < 6:
+            print(f"  ❌ Insufficient historical data")
+            return None
+        
+        closes = [float(bar['c']) for bar in hist_data['results']]
+        print(f"  ✅ Got {len(closes)} days of historical data")
+        
+        return {
+            'current': current_price,
+            'high_today': high_today,
+            'low_today': low_today,
+            'history_closes': closes
+        }
+        
+    except Exception as e:
+        print(f"  ❌ Polygon SPX error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_vix_data_polygon():
+    """Fetch VIX data from Polygon.io"""
+    try:
+        print("  [Polygon] Fetching VIX data...")
+        
+        # Get current VIX quote
+        quote_url = f"https://api.polygon.io/v2/last/trade/I:VIX?apiKey={POLYGON_API_KEY}"
+        response = requests.get(quote_url, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"  ❌ Polygon VIX failed: {response.status_code}")
+            return None
+        
+        data = response.json()
+        
+        if 'results' not in data:
+            print(f"  ❌ No results in VIX data")
+            return None
+        
+        vix_value = float(data['results']['p'])
+        print(f"  ✅ VIX: {vix_value:.2f}")
+        
+        # Sanity check
+        if vix_value < 5 or vix_value > 100:
+            print(f"  ❌ VIX value {vix_value:.2f} outside normal range")
+            return None
+        
+        return {
+            'current': vix_value,
+            'tenor': '30-day',
+            'source': 'Polygon_VIX',
+            'method': 'Polygon.io API'
+        }
+        
+    except Exception as e:
+        print(f"  ❌ Polygon VIX error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def get_spx_data_with_retry(max_retries=3):
-    """Fetch SPX data with retry logic"""
+    """Fetch SPX with Polygon (with retry)"""
     for attempt in range(max_retries):
         try:
-            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching SPX data...")
-            
-            result = get_spx_data()
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching SPX...")
+            result = get_spx_data_polygon()
             
             if result is not None:
                 print(f"  ✅ SPX fetch succeeded on attempt {attempt + 1}")
                 return result
             
             print(f"  ⚠️ Attempt {attempt + 1} returned None, retrying...")
-            time_module.sleep(2)  # Wait 2 seconds before retry
+            time_module.sleep(1)
             
         except Exception as e:
             print(f"  ❌ Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                time_module.sleep(2)
-            else:
-                print(f"  ❌ All {max_retries} attempts failed")
-                return None
+                time_module.sleep(1)
     
     return None
 
-def get_spx_data():
-    """Fetch SPX data from Yahoo Finance - With session and error handling"""
-    try:
-        # Use session to avoid blocking
-        spx = yf.Ticker("^GSPC", session=YF_SESSION)
-        
-        current_price = None
-        
-        # METHOD 1: Try history with 5 days (most reliable)
-        try:
-            print("  [Method 1] Trying history(period='5d')...")
-            history_5d = spx.history(period="5d")
-            
-            if not history_5d.empty and len(history_5d) > 0:
-                current_price = float(history_5d['Close'].iloc[-1])
-                print(f"  ✅ Method 1 success: {current_price:.2f}")
-        except Exception as e:
-            print(f"  ❌ Method 1 failed: {e}")
-        
-        # METHOD 2: Try fast_info if Method 1 failed
-        if current_price is None:
-            try:
-                print("  [Method 2] Trying fast_info...")
-                current_price = float(spx.fast_info['lastPrice'])
-                print(f"  ✅ Method 2 success: {current_price:.2f}")
-            except Exception as e:
-                print(f"  ❌ Method 2 failed: {e}")
-        
-        # METHOD 3: Try info as last resort
-        if current_price is None:
-            try:
-                print("  [Method 3] Trying info...")
-                info = spx.info
-                current_price = info.get('regularMarketPrice') or info.get('currentPrice')
-                if current_price:
-                    current_price = float(current_price)
-                    print(f"  ✅ Method 3 success: {current_price:.2f}")
-            except Exception as e:
-                print(f"  ❌ Method 3 failed: {e}")
-        
-        if current_price is None or current_price <= 0:
-            print(f"  ❌ ERROR: Could not get valid SPX price")
-            return None
-        
-        # Get intraday high/low (use 5-day history if available)
-        try:
-            if 'history_5d' in locals() and not history_5d.empty:
-                # Get today's data from 5-day history
-                today_data = history_5d.tail(1)
-                high_today = float(today_data['High'].iloc[-1])
-                low_today = float(today_data['Low'].iloc[-1])
-            else:
-                high_today = current_price
-                low_today = current_price
-        except Exception as e:
-            print(f"  ⚠️ Could not get high/low: {e}")
-            high_today = current_price
-            low_today = current_price
-        
-        # Get historical daily closes (15 days)
-        try:
-            print("  [Getting historical data]...")
-            history = spx.history(period="15d")
-            
-            if history.empty or len(history) < 6:
-                print(f"  ❌ ERROR: Insufficient historical data (got {len(history)} days)")
-                return None
-            
-            closes = history['Close'].values
-            print(f"  ✅ Got {len(closes)} days of historical data")
-            
-        except Exception as e:
-            print(f"  ❌ ERROR: Could not get historical data: {e}")
-            return None
-        
-        print(f"  ✅ SPX SUCCESS: Current={current_price:.2f}, High={high_today:.2f}, Low={low_today:.2f}")
-        
-        return {
-            'current': float(current_price),
-            'high_today': float(high_today),
-            'low_today': float(low_today),
-            'history_closes': [float(x) for x in closes]
-        }
-        
-    except Exception as e:
-        print(f"  ❌ CRITICAL ERROR in get_spx_data: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 def get_overnight_iv_with_retry(max_retries=3):
-    """Fetch VIX1D with retry logic"""
+    """Fetch VIX with Polygon (with retry)"""
     for attempt in range(max_retries):
         try:
-            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VIX1D...")
-            
-            result = get_overnight_iv()
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VIX...")
+            result = get_vix_data_polygon()
             
             if result is not None:
-                print(f"  ✅ VIX1D fetch succeeded on attempt {attempt + 1}")
+                print(f"  ✅ VIX fetch succeeded on attempt {attempt + 1}")
                 return result
             
             print(f"  ⚠️ Attempt {attempt + 1} returned None, retrying...")
-            time_module.sleep(2)
+            time_module.sleep(1)
             
         except Exception as e:
             print(f"  ❌ Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                time_module.sleep(2)
-            else:
-                print(f"  ❌ All {max_retries} attempts failed")
-                return None
+                time_module.sleep(1)
     
     return None
-
-def get_overnight_iv():
-    """Get overnight IV from VIX1D with session"""
-    try:
-        # Use session to avoid blocking
-        vix1d = yf.Ticker("^VIX1D", session=YF_SESSION)
-        
-        iv_value = None
-        
-        # METHOD 1: Try history
-        try:
-            print("  [VIX Method 1] Trying history(period='5d')...")
-            data = vix1d.history(period="5d")
-            
-            if not data.empty and len(data) > 0:
-                iv_value = float(data['Close'].iloc[-1])
-                print(f"  ✅ VIX Method 1 success: {iv_value:.2f}")
-        except Exception as e:
-            print(f"  ❌ VIX Method 1 failed: {e}")
-        
-        # METHOD 2: Try fast_info
-        if iv_value is None:
-            try:
-                print("  [VIX Method 2] Trying fast_info...")
-                iv_value = float(vix1d.fast_info['lastPrice'])
-                print(f"  ✅ VIX Method 2 success: {iv_value:.2f}")
-            except Exception as e:
-                print(f"  ❌ VIX Method 2 failed: {e}")
-        
-        if iv_value is None:
-            print("  ❌ ERROR: Could not get VIX1D value")
-            return None
-        
-        # Sanity check
-        if iv_value < 5 or iv_value > 100:
-            print(f"  ❌ ERROR: VIX1D value {iv_value:.2f}% outside normal range")
-            return None
-        
-        print(f"  ✅ VIX1D SUCCESS: {iv_value:.2f}%")
-        
-        return {
-            'current': iv_value,
-            'tenor': '1-day',
-            'source': 'VIX1D_direct',
-            'method': 'Direct ticker fetch'
-        }
-        
-    except Exception as e:
-        print(f"  ❌ CRITICAL ERROR in get_overnight_iv: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 # ============================================================================
 # INDICATOR 1: IV/RV RATIO (30%)
@@ -642,10 +589,11 @@ def get_overnight_iv():
 
 def analyze_iv_rv_ratio(spx_data, iv_data):
     """
-    Analyze IV/RV ratio with MATCHED 1-day tenor
+    Analyze IV/RV ratio
+    Using 30-day VIX vs 10-day RV (Polygon limitation - no VIX1D)
     """
-    # For 1-day IV, use recent 5-day realized volatility
-    closes = spx_data['history_closes'][-6:]  # Last 6 days to get 5 daily returns
+    # Use 10-day RV for 30-day VIX
+    closes = spx_data['history_closes'][-11:]  # Last 11 days to get 10 returns
     
     # Calculate realized volatility
     returns = []
@@ -657,7 +605,7 @@ def analyze_iv_rv_ratio(spx_data, iv_data):
     squared_diffs = [(r - mean_return)**2 for r in returns]
     variance = sum(squared_diffs) / (len(returns) - 1)
     daily_std = math.sqrt(variance)
-    realized_vol = daily_std * math.sqrt(252) * 100  # Annualized
+    realized_vol = daily_std * math.sqrt(252) * 100
     
     implied_vol = iv_data['current']
     iv_rv_ratio = implied_vol / realized_vol
@@ -678,14 +626,13 @@ def analyze_iv_rv_ratio(spx_data, iv_data):
     else:
         base_score = 10
     
-    # RV change modifier (compare recent RV to earlier RV)
-    closes_earlier = spx_data['history_closes'][-11:-5]  # 5 days before the recent 5
-    
-    returns_earlier = []
-    for i in range(1, len(closes_earlier)):
-        returns_earlier.append(math.log(closes_earlier[i] / closes_earlier[i-1]))
-    
-    if len(returns_earlier) > 0:
+    # RV change modifier
+    if len(spx_data['history_closes']) >= 21:
+        closes_earlier = spx_data['history_closes'][-21:-10]
+        returns_earlier = []
+        for i in range(1, len(closes_earlier)):
+            returns_earlier.append(math.log(closes_earlier[i] / closes_earlier[i-1]))
+        
         mean_earlier = sum(returns_earlier) / len(returns_earlier)
         variance_earlier = sum([(r - mean_earlier)**2 for r in returns_earlier]) / (len(returns_earlier) - 1)
         rv_earlier = math.sqrt(variance_earlier) * math.sqrt(252) * 100
@@ -711,8 +658,8 @@ def analyze_iv_rv_ratio(spx_data, iv_data):
         'realized_vol': round(realized_vol, 2),
         'implied_vol': round(implied_vol, 2),
         'iv_rv_ratio': round(iv_rv_ratio, 3),
-        'tenor': '1-day',
-        'source': iv_data.get('source', 'Unknown'),
+        'tenor': '30-day',
+        'source': iv_data.get('source', 'Polygon'),
         'rv_change': round(rv_change, 3)
     }
 
@@ -1217,7 +1164,7 @@ def homepage():
                 <div class="edge-item">
                     <div class="edge-label">🔍 Signal Components (3 Indicators):</div>
                     <div class="edge-desc">
-                        <strong>1. IV/RV Ratio (30%):</strong> 1-day implied vol vs 5-day realized vol (matched tenors).<br>
+                        <strong>1. IV/RV Ratio (30%):</strong> 30-day implied vol vs 10-day realized vol.<br>
                         <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
                         <strong>3. GPT News Analysis (50%):</strong> Triple-layer filtering (Algo dedup → Keyword → GPT).
                     </div>
@@ -1249,12 +1196,12 @@ def homepage():
                     <span class="info-value">Railway Production</span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">IV Source:</span>
-                    <span class="info-value">VIX1D (1-day tenor) with retry logic</span>
+                    <span class="info-label">Data Source:</span>
+                    <span class="info-value">Polygon.io API (100 calls/day free)</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">News Parsing:</span>
-                    <span class="info-value">Direct HTTP + XML (No feedparser dependency)</span>
+                    <span class="info-value">Direct HTTP + XML (No feedparser)</span>
                 </div>
             </div>
             
@@ -1279,7 +1226,7 @@ def health_check():
         "environment": "production",
         "trading_window": "2:30-3:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
-        "iv_source": "VIX1D (1-day tenor) with retry",
+        "data_source": "Polygon.io API",
         "news_parser": "Direct HTTP + XML (No feedparser)"
     }), 200
 
@@ -1302,14 +1249,14 @@ def option_alpha_trigger():
     try:
         print(f"[{timestamp}] Fetching market data...")
         
-        # Use retry versions
+        # Use Polygon.io with retry
         spx_data = get_spx_data_with_retry(max_retries=3)
         if not spx_data:
-            return jsonify({"status": "error", "message": "SPX failed after 3 retries"}), 500
+            return jsonify({"status": "error", "message": "SPX failed after 3 retries (Polygon.io)"}), 500
         
         iv_data = get_overnight_iv_with_retry(max_retries=3)
         if not iv_data:
-            return jsonify({"status": "error", "message": "VIX1D failed after 3 retries"}), 500
+            return jsonify({"status": "error", "message": "VIX failed after 3 retries (Polygon.io)"}), 500
         
         # Fetch news
         news_data = fetch_news_multi_source()
@@ -1376,9 +1323,8 @@ def option_alpha_trigger():
                 "spx_current": spx_data['current'],
                 "spx_high": spx_data['high_today'],
                 "spx_low": spx_data['low_today'],
-                "overnight_iv": iv_data['current'],
-                "iv_source": iv_data.get('source', 'Unknown'),
-                "iv_method": iv_data.get('method', 'Unknown')
+                "vix_current": iv_data['current'],
+                "data_source": "Polygon.io"
             },
             
             "indicator_1_iv_rv": {
@@ -1387,8 +1333,8 @@ def option_alpha_trigger():
                 "iv_rv_ratio": iv_rv['iv_rv_ratio'],
                 "realized_vol": f"{iv_rv['realized_vol']}%",
                 "implied_vol": f"{iv_rv['implied_vol']}%",
-                "tenor": "1-day",
-                "iv_source": iv_rv.get('source', 'Unknown')
+                "tenor": "30-day",
+                "source": "Polygon.io"
             },
             
             "indicator_2_trend": {
@@ -1466,11 +1412,11 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     
     print("=" * 80)
-    print("Ren's SPX Vol Signal - Production (Nuclear + 1-Day IV/RV + Retry)")
+    print("Ren's SPX Vol Signal - Production (Polygon.io)")
     print("=" * 80)
     print(f"Port: {PORT}")
     print(f"Trading Window: 2:30-3:30 PM ET")
-    print(f"IV Source: VIX1D (1-day tenor) with retry logic")
+    print(f"Data Source: Polygon.io API")
     print(f"News Parser: Direct HTTP + XML (No feedparser)")
     print("=" * 80)
     

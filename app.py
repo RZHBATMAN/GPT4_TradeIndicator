@@ -1410,75 +1410,224 @@ def poke_self():
 
 @app.route("/test_yahoo", methods=["GET"])
 def test_yahoo():
-    """Test Yahoo Finance directly"""
-    results = {}
+    """Comprehensive Yahoo Finance test - SPX, VIX, SPY, and more"""
+    results = {
+        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production'
+    }
     
-    # Test 1: Import yfinance
+    # Test 1: yfinance version
     try:
         import yfinance as yf
         results['yfinance_version'] = yf.__version__
-        results['yfinance_import'] = 'SUCCESS'
+        results['yfinance_import'] = '✅ SUCCESS'
     except Exception as e:
-        results['yfinance_import'] = f'FAILED: {str(e)}'
+        results['yfinance_import'] = f'❌ FAILED: {str(e)}'
         return jsonify(results), 500
     
-    # Test 2: Create session with headers
-    try:
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        })
-        results['session_created'] = 'SUCCESS'
-    except Exception as e:
-        results['session_created'] = f'FAILED: {str(e)}'
+    # Create session with headers
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+    })
+    results['session_created'] = '✅ SUCCESS'
     
-    # Test 3: Try SPX with session
+    # ========================================================================
+    # TEST SPX (^GSPC) - Multiple methods
+    # ========================================================================
+    results['spx_tests'] = {}
+    
     try:
         spx = yf.Ticker("^GSPC", session=session)
-        results['ticker_created'] = 'SUCCESS'
-    except Exception as e:
-        results['ticker_created'] = f'FAILED: {str(e)}'
-        return jsonify(results), 500
+        results['spx_tests']['ticker_created'] = '✅ SUCCESS'
+        
+        # Method 1: history(period="5d")
+        try:
+            hist_5d = spx.history(period="5d")
+            results['spx_tests']['history_5d'] = {
+                'status': '✅ SUCCESS',
+                'length': len(hist_5d),
+                'empty': hist_5d.empty,
+                'latest_close': float(hist_5d['Close'].iloc[-1]) if not hist_5d.empty else None,
+                'columns': list(hist_5d.columns) if not hist_5d.empty else []
+            }
+        except Exception as e:
+            results['spx_tests']['history_5d'] = {'status': f'❌ FAILED: {str(e)}'}
+        
+        # Method 2: history(period="1mo")
+        try:
+            hist_1mo = spx.history(period="1mo")
+            results['spx_tests']['history_1mo'] = {
+                'status': '✅ SUCCESS',
+                'length': len(hist_1mo),
+                'empty': hist_1mo.empty,
+                'latest_close': float(hist_1mo['Close'].iloc[-1]) if not hist_1mo.empty else None
+            }
+        except Exception as e:
+            results['spx_tests']['history_1mo'] = {'status': f'❌ FAILED: {str(e)}'}
+        
+        # Method 3: history(period="1d", interval="1m")
+        try:
+            hist_intraday = spx.history(period="1d", interval="1m")
+            results['spx_tests']['history_intraday'] = {
+                'status': '✅ SUCCESS',
+                'length': len(hist_intraday),
+                'empty': hist_intraday.empty,
+                'latest_close': float(hist_intraday['Close'].iloc[-1]) if not hist_intraday.empty else None
+            }
+        except Exception as e:
+            results['spx_tests']['history_intraday'] = {'status': f'❌ FAILED: {str(e)}'}
+        
+        # Method 4: fast_info
+        try:
+            price = spx.fast_info['lastPrice']
+            results['spx_tests']['fast_info'] = {
+                'status': '✅ SUCCESS',
+                'price': float(price)
+            }
+        except Exception as e:
+            results['spx_tests']['fast_info'] = {'status': f'❌ FAILED: {str(e)}'}
+        
+        # Method 5: info
+        try:
+            info = spx.info
+            price = info.get('regularMarketPrice') or info.get('currentPrice')
+            results['spx_tests']['info'] = {
+                'status': '✅ SUCCESS',
+                'price': float(price) if price else None,
+                'has_data': len(info) > 0
+            }
+        except Exception as e:
+            results['spx_tests']['info'] = {'status': f'❌ FAILED: {str(e)}'}
     
-    # Test 4: Try history
-    try:
-        hist = spx.history(period="5d")
-        results['history_call'] = 'SUCCESS'
-        results['history_length'] = len(hist)
-        if not hist.empty:
-            results['latest_close'] = float(hist['Close'].iloc[-1])
-        else:
-            results['history_empty'] = True
     except Exception as e:
-        results['history_call'] = f'FAILED: {str(e)}'
+        results['spx_tests']['error'] = f'❌ CRITICAL: {str(e)}'
     
-    # Test 5: Try fast_info
-    try:
-        price = spx.fast_info['lastPrice']
-        results['fast_info_call'] = 'SUCCESS'
-        results['fast_info_price'] = float(price)
-    except Exception as e:
-        results['fast_info_call'] = f'FAILED: {str(e)}'
+    # ========================================================================
+    # TEST VIX (^VIX)
+    # ========================================================================
+    results['vix_tests'] = {}
     
-    # Test 6: Try info
-    try:
-        info = spx.info
-        price = info.get('regularMarketPrice') or info.get('currentPrice')
-        results['info_call'] = 'SUCCESS'
-        results['info_price'] = float(price) if price else None
-    except Exception as e:
-        results['info_call'] = f'FAILED: {str(e)}'
-    
-    # Test 7: Try VIX
     try:
         vix = yf.Ticker("^VIX", session=session)
-        vix_hist = vix.history(period="5d")
-        results['vix_call'] = 'SUCCESS'
-        results['vix_length'] = len(vix_hist)
-        if not vix_hist.empty:
-            results['vix_close'] = float(vix_hist['Close'].iloc[-1])
+        results['vix_tests']['ticker_created'] = '✅ SUCCESS'
+        
+        # Method 1: history(period="5d")
+        try:
+            hist_5d = vix.history(period="5d")
+            results['vix_tests']['history_5d'] = {
+                'status': '✅ SUCCESS',
+                'length': len(hist_5d),
+                'empty': hist_5d.empty,
+                'latest_close': float(hist_5d['Close'].iloc[-1]) if not hist_5d.empty else None
+            }
+        except Exception as e:
+            results['vix_tests']['history_5d'] = {'status': f'❌ FAILED: {str(e)}'}
+        
+        # Method 2: history(period="1mo")
+        try:
+            hist_1mo = vix.history(period="1mo")
+            results['vix_tests']['history_1mo'] = {
+                'status': '✅ SUCCESS',
+                'length': len(hist_1mo),
+                'empty': hist_1mo.empty,
+                'latest_close': float(hist_1mo['Close'].iloc[-1]) if not hist_1mo.empty else None
+            }
+        except Exception as e:
+            results['vix_tests']['history_1mo'] = {'status': f'❌ FAILED: {str(e)}'}
+    
     except Exception as e:
-        results['vix_call'] = f'FAILED: {str(e)}'
+        results['vix_tests']['error'] = f'❌ CRITICAL: {str(e)}'
+    
+    # ========================================================================
+    # TEST SPY (S&P 500 ETF)
+    # ========================================================================
+    results['spy_tests'] = {}
+    
+    try:
+        spy = yf.Ticker("SPY", session=session)
+        results['spy_tests']['ticker_created'] = '✅ SUCCESS'
+        
+        # Method 1: history(period="5d")
+        try:
+            hist_5d = spy.history(period="5d")
+            results['spy_tests']['history_5d'] = {
+                'status': '✅ SUCCESS',
+                'length': len(hist_5d),
+                'empty': hist_5d.empty,
+                'latest_close': float(hist_5d['Close'].iloc[-1]) if not hist_5d.empty else None,
+                'spx_equivalent': float(hist_5d['Close'].iloc[-1]) * 10 if not hist_5d.empty else None
+            }
+        except Exception as e:
+            results['spy_tests']['history_5d'] = {'status': f'❌ FAILED: {str(e)}'}
+        
+        # Method 2: fast_info
+        try:
+            price = spy.fast_info['lastPrice']
+            results['spy_tests']['fast_info'] = {
+                'status': '✅ SUCCESS',
+                'spy_price': float(price),
+                'spx_equivalent': float(price) * 10
+            }
+        except Exception as e:
+            results['spy_tests']['fast_info'] = {'status': f'❌ FAILED: {str(e)}'}
+    
+    except Exception as e:
+        results['spy_tests']['error'] = f'❌ CRITICAL: {str(e)}'
+    
+    # ========================================================================
+    # TEST REGULAR STOCKS (Control group)
+    # ========================================================================
+    results['stock_tests'] = {}
+    
+    # Test AAPL
+    try:
+        aapl = yf.Ticker("AAPL", session=session)
+        hist = aapl.history(period="5d")
+        results['stock_tests']['AAPL'] = {
+            'status': '✅ SUCCESS',
+            'length': len(hist),
+            'empty': hist.empty,
+            'latest_close': float(hist['Close'].iloc[-1]) if not hist.empty else None
+        }
+    except Exception as e:
+        results['stock_tests']['AAPL'] = {'status': f'❌ FAILED: {str(e)}'}
+    
+    # Test MSFT
+    try:
+        msft = yf.Ticker("MSFT", session=session)
+        hist = msft.history(period="5d")
+        results['stock_tests']['MSFT'] = {
+            'status': '✅ SUCCESS',
+            'length': len(hist),
+            'empty': hist.empty,
+            'latest_close': float(hist['Close'].iloc[-1]) if not hist.empty else None
+        }
+    except Exception as e:
+        results['stock_tests']['MSFT'] = {'status': f'❌ FAILED: {str(e)}'}
+    
+    # ========================================================================
+    # SUMMARY & RECOMMENDATION
+    # ========================================================================
+    results['summary'] = {
+        'spx_working': any('✅' in str(v) and v.get('length', 0) > 0 for v in results['spx_tests'].values() if isinstance(v, dict)),
+        'vix_working': any('✅' in str(v) and v.get('length', 0) > 0 for v in results['vix_tests'].values() if isinstance(v, dict)),
+        'spy_working': any('✅' in str(v) and v.get('length', 0) > 0 for v in results['spy_tests'].values() if isinstance(v, dict)),
+        'stocks_working': any('✅' in str(v) and v.get('length', 0) > 0 for v in results['stock_tests'].values() if isinstance(v, dict))
+    }
+    
+    # Recommendation
+    if results['summary']['spx_working'] and results['summary']['vix_working']:
+        results['recommendation'] = '✅ USE YAHOO FINANCE with ^GSPC and ^VIX directly'
+    elif results['summary']['spy_working']:
+        results['recommendation'] = '⚠️ USE YAHOO FINANCE with SPY (multiply by 10 for SPX equivalent) + need VIX alternative'
+    elif results['summary']['stocks_working']:
+        results['recommendation'] = '❌ Yahoo blocks indices on Railway - SWITCH TO TWELVE DATA API'
+    else:
+        results['recommendation'] = '❌ Yahoo Finance completely blocked on Railway - SWITCH TO TWELVE DATA API'
     
     return jsonify(results), 200
 

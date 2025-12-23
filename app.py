@@ -1395,7 +1395,166 @@ def poke_self():
 ############ TEST APIS ENDPOINTS ############
 
 
-
+@app.route("/test_yahoo_spy", methods=["GET"])
+def test_yahoo_spy():
+    """Test Yahoo Finance with SPY (S&P 500 ETF) instead of SPX index"""
+    results = {
+        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production',
+        'api_provider': 'Yahoo Finance (yfinance)',
+        'strategy': 'Use SPY ETF as SPX proxy (SPY × 10 ≈ SPX)'
+    }
+    
+    # Test yfinance import
+    try:
+        import yfinance as yf
+        results['yfinance_version'] = yf.__version__
+        results['yfinance_import'] = '✅ SUCCESS'
+    except Exception as e:
+        results['yfinance_import'] = f'❌ FAILED: {str(e)}'
+        return jsonify(results), 500
+    
+    # Create session
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    })
+    
+    # ========================================================================
+    # TEST SPY (S&P 500 ETF as SPX proxy)
+    # ========================================================================
+    results['spy_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching SPY data...")
+        spy = yf.Ticker("SPY", session=session)
+        
+        # Method 1: history
+        hist = spy.history(period="5d")
+        results['spy_tests']['history_status'] = '✅ SUCCESS' if not hist.empty else '❌ EMPTY'
+        results['spy_tests']['history_length'] = len(hist)
+        
+        if not hist.empty:
+            spy_price = float(hist['Close'].iloc[-1])
+            spx_equivalent = spy_price * 10
+            results['spy_tests']['spy_price'] = spy_price
+            results['spy_tests']['spx_equivalent'] = spx_equivalent
+            results['spy_tests']['spy_high'] = float(hist['High'].iloc[-1])
+            results['spy_tests']['spy_low'] = float(hist['Low'].iloc[-1])
+            
+            # Get multiple days for RV calculation
+            closes = [float(c) for c in hist['Close'].tolist()]
+            results['spy_tests']['closes_available'] = len(closes)
+            results['spy_tests']['sample_closes'] = closes[-3:] if len(closes) >= 3 else closes
+        
+        # Method 2: fast_info (if available)
+        try:
+            fast_price = spy.fast_info.get('lastPrice')
+            if fast_price:
+                results['spy_tests']['fast_info_status'] = '✅ SUCCESS'
+                results['spy_tests']['fast_info_price'] = float(fast_price)
+                results['spy_tests']['fast_info_spx_equivalent'] = float(fast_price) * 10
+            else:
+                results['spy_tests']['fast_info_status'] = '❌ NO PRICE'
+        except Exception as e:
+            results['spy_tests']['fast_info_status'] = f'❌ FAILED: {str(e)}'
+    
+    except Exception as e:
+        results['spy_tests']['error'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST VXX (VIX Short-Term Futures ETF as VIX proxy)
+    # ========================================================================
+    results['vxx_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching VXX data (VIX proxy)...")
+        vxx = yf.Ticker("VXX", session=session)
+        
+        hist = vxx.history(period="5d")
+        results['vxx_tests']['history_status'] = '✅ SUCCESS' if not hist.empty else '❌ EMPTY'
+        results['vxx_tests']['history_length'] = len(hist)
+        
+        if not hist.empty:
+            vxx_price = float(hist['Close'].iloc[-1])
+            results['vxx_tests']['vxx_price'] = vxx_price
+            results['vxx_tests']['note'] = 'VXX tracks VIX futures (not exact VIX, but correlates)'
+    
+    except Exception as e:
+        results['vxx_tests']['error'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST DIRECT VIX (might still fail, but worth trying)
+    # ========================================================================
+    results['vix_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching ^VIX data...")
+        vix = yf.Ticker("^VIX", session=session)
+        
+        hist = vix.history(period="5d")
+        results['vix_tests']['history_status'] = '✅ SUCCESS' if not hist.empty else '❌ EMPTY'
+        results['vix_tests']['history_length'] = len(hist)
+        
+        if not hist.empty:
+            vix_value = float(hist['Close'].iloc[-1])
+            results['vix_tests']['vix_value'] = vix_value
+    
+    except Exception as e:
+        results['vix_tests']['error'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # CONTROL: Test regular stocks
+    # ========================================================================
+    results['control_tests'] = {}
+    
+    for symbol in ['AAPL', 'MSFT']:
+        try:
+            ticker = yf.Ticker(symbol, session=session)
+            hist = ticker.history(period="5d")
+            
+            if not hist.empty:
+                results['control_tests'][symbol] = {
+                    'status': '✅ SUCCESS',
+                    'price': float(hist['Close'].iloc[-1]),
+                    'days': len(hist)
+                }
+            else:
+                results['control_tests'][symbol] = {'status': '❌ EMPTY'}
+        except Exception as e:
+            results['control_tests'][symbol] = {'status': f'❌ ERROR: {str(e)}'}
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    spy_working = results['spy_tests'].get('history_length', 0) > 0
+    vix_working = results['vix_tests'].get('history_length', 0) > 0
+    vxx_working = results['vxx_tests'].get('history_length', 0) > 0
+    stocks_working = any(v.get('status') == '✅ SUCCESS' for v in results['control_tests'].values())
+    
+    results['summary'] = {
+        'spy_working': spy_working,
+        'vix_working': vix_working,
+        'vxx_working': vxx_working,
+        'stocks_working': stocks_working
+    }
+    
+    if spy_working and (vix_working or vxx_working):
+        results['recommendation'] = '✅ YAHOO FINANCE WORKING with SPY proxy!'
+        results['status'] = 'READY'
+        results['approach'] = 'Use SPY × 10 for SPX, use VIX or VXX for volatility'
+    elif spy_working and stocks_working:
+        results['recommendation'] = '⚠️ SPY works but VIX/VXX failed - Can use fixed VIX estimate or skip IV/RV indicator'
+        results['status'] = 'SPY_ONLY'
+        results['approach'] = 'Use SPY × 10 for SPX, estimate VIX at ~15-20 or skip IV/RV check'
+    elif stocks_working:
+        results['recommendation'] = '⚠️ Regular stocks work but SPY failed - Unexpected!'
+        results['status'] = 'STOCKS_ONLY'
+    else:
+        results['recommendation'] = '❌ Yahoo Finance completely blocked on Railway'
+        results['status'] = 'BLOCKED'
+    
+    return jsonify(results), 200
 
 @app.route("/test_twelve", methods=["GET"])
 def test_twelve():

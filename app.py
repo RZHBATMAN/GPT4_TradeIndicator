@@ -1761,207 +1761,168 @@ def test_twelve():
     
     return jsonify(results), 200
 
-
-
 @app.route("/test_alpha_vantage", methods=["GET"])
 def test_alpha_vantage():
-    """Test Alpha Vantage API - SPX, VIX, and controls"""
+    """Test Alpha Vantage FREE tier with SPY/VXX (official proxy for SPX/VIX)"""
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
         'environment': 'Railway Production',
         'api_provider': 'Alpha Vantage',
-        'api_website': 'https://www.alphavantage.co'
+        'strategy': 'Use SPY (SPX proxy) and VXX (VIX proxy) - Official recommendation'
     }
     
-    # Check if we have ALPHA_VANTAGE_KEY
     ALPHA_VANTAGE_KEY = os.environ.get('ALPHA_VANTAGE_KEY')
     
-    # ========================================================================
-    # TEST ALPHA VANTAGE API KEY
-    # ========================================================================
-    results['api_key_check'] = {}
+    if not ALPHA_VANTAGE_KEY:
+        return jsonify({'error': 'ALPHA_VANTAGE_KEY not set'}), 500
     
-    if not ALPHA_VANTAGE_KEY or ALPHA_VANTAGE_KEY == '':
-        results['api_key_check']['status'] = '❌ MISSING'
-        results['api_key_check']['message'] = 'ALPHA_VANTAGE_KEY environment variable not set'
-        return jsonify(results), 500
-    else:
-        results['api_key_check']['status'] = '✅ PRESENT'
-        results['api_key_check']['length'] = len(ALPHA_VANTAGE_KEY)
-        results['api_key_check']['preview'] = ALPHA_VANTAGE_KEY[:8] + '...' if len(ALPHA_VANTAGE_KEY) > 8 else ALPHA_VANTAGE_KEY
-    
-    # ========================================================================
-    # TEST SPX DATA (^GSPC)
-    # ========================================================================
-    results['spx_tests'] = {}
-    
-    # Method 1: GLOBAL_QUOTE (real-time price)
-    try:
-        print("  [TEST] Fetching SPX via GLOBAL_QUOTE...")
-        quote_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=SPX&apikey={ALPHA_VANTAGE_KEY}"
-        quote_response = requests.get(quote_url, timeout=10)
-        
-        results['spx_tests']['global_quote_http_status'] = quote_response.status_code
-        
-        if quote_response.status_code == 200:
-            quote_data = quote_response.json()
-            results['spx_tests']['global_quote_response'] = quote_data
-            
-            if 'Error Message' in quote_data:
-                results['spx_tests']['global_quote_status'] = f"❌ ERROR: {quote_data['Error Message']}"
-            elif 'Note' in quote_data:
-                results['spx_tests']['global_quote_status'] = f"⚠️ RATE LIMITED: {quote_data['Note']}"
-            elif 'Global Quote' in quote_data and '05. price' in quote_data['Global Quote']:
-                results['spx_tests']['global_quote_status'] = '✅ SUCCESS'
-                results['spx_tests']['spx_price'] = float(quote_data['Global Quote']['05. price'])
-                results['spx_tests']['spx_high'] = float(quote_data['Global Quote']['03. high'])
-                results['spx_tests']['spx_low'] = float(quote_data['Global Quote']['04. low'])
-                results['spx_tests']['spx_change'] = quote_data['Global Quote']['09. change']
-            else:
-                results['spx_tests']['global_quote_status'] = '❌ UNEXPECTED RESPONSE FORMAT'
-        else:
-            results['spx_tests']['global_quote_status'] = f'❌ HTTP ERROR {quote_response.status_code}'
-    
-    except Exception as e:
-        results['spx_tests']['global_quote_status'] = f'❌ EXCEPTION: {str(e)}'
-        import traceback
-        results['spx_tests']['global_quote_traceback'] = traceback.format_exc()
-    
-    # Method 2: TIME_SERIES_DAILY (historical data)
-    try:
-        print("  [TEST] Fetching SPX via TIME_SERIES_DAILY...")
-        ts_url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPX&outputsize=compact&apikey={ALPHA_VANTAGE_KEY}"
-        ts_response = requests.get(ts_url, timeout=10)
-        
-        results['spx_tests']['time_series_http_status'] = ts_response.status_code
-        
-        if ts_response.status_code == 200:
-            ts_data = ts_response.json()
-            
-            if 'Error Message' in ts_data:
-                results['spx_tests']['time_series_status'] = f"❌ ERROR: {ts_data['Error Message']}"
-            elif 'Note' in ts_data:
-                results['spx_tests']['time_series_status'] = f"⚠️ RATE LIMITED: {ts_data['Note']}"
-            elif 'Time Series (Daily)' in ts_data:
-                results['spx_tests']['time_series_status'] = '✅ SUCCESS'
-                dates = list(ts_data['Time Series (Daily)'].keys())
-                results['spx_tests']['days_available'] = len(dates)
-                results['spx_tests']['latest_date'] = dates[0] if dates else 'None'
-                results['spx_tests']['sample_data'] = {dates[0]: ts_data['Time Series (Daily)'][dates[0]]} if dates else {}
-            else:
-                results['spx_tests']['time_series_status'] = '❌ UNEXPECTED RESPONSE FORMAT'
-                results['spx_tests']['time_series_response'] = ts_data
-        else:
-            results['spx_tests']['time_series_status'] = f'❌ HTTP ERROR {ts_response.status_code}'
-    
-    except Exception as e:
-        results['spx_tests']['time_series_status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    # ========================================================================
-    # TEST VIX DATA
-    # ========================================================================
-    results['vix_tests'] = {}
-    
-    try:
-        print("  [TEST] Fetching VIX via GLOBAL_QUOTE...")
-        vix_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=VIX&apikey={ALPHA_VANTAGE_KEY}"
-        vix_response = requests.get(vix_url, timeout=10)
-        
-        results['vix_tests']['global_quote_http_status'] = vix_response.status_code
-        
-        if vix_response.status_code == 200:
-            vix_data = vix_response.json()
-            results['vix_tests']['global_quote_response'] = vix_data
-            
-            if 'Error Message' in vix_data:
-                results['vix_tests']['global_quote_status'] = f"❌ ERROR: {vix_data['Error Message']}"
-            elif 'Note' in vix_data:
-                results['vix_tests']['global_quote_status'] = f"⚠️ RATE LIMITED: {vix_data['Note']}"
-            elif 'Global Quote' in vix_data and '05. price' in vix_data['Global Quote']:
-                results['vix_tests']['global_quote_status'] = '✅ SUCCESS'
-                results['vix_tests']['vix_value'] = float(vix_data['Global Quote']['05. price'])
-            else:
-                results['vix_tests']['global_quote_status'] = '❌ UNEXPECTED RESPONSE FORMAT'
-        else:
-            results['vix_tests']['global_quote_status'] = f'❌ HTTP ERROR {vix_response.status_code}'
-    
-    except Exception as e:
-        results['vix_tests']['global_quote_status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    # ========================================================================
-    # TEST STOCK DATA (Control - AAPL)
-    # ========================================================================
-    results['control_tests'] = {}
-    
-    try:
-        print("  [TEST] Fetching AAPL quote (control test)...")
-        aapl_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL&apikey={ALPHA_VANTAGE_KEY}"
-        aapl_response = requests.get(aapl_url, timeout=10)
-        
-        if aapl_response.status_code == 200:
-            aapl_data = aapl_response.json()
-            
-            if 'Error Message' in aapl_data:
-                results['control_tests']['AAPL'] = {'status': f"❌ ERROR: {aapl_data['Error Message']}"}
-            elif 'Note' in aapl_data:
-                results['control_tests']['AAPL'] = {'status': f"⚠️ RATE LIMITED: {aapl_data['Note']}"}
-            elif 'Global Quote' in aapl_data and '05. price' in aapl_data['Global Quote']:
-                results['control_tests']['AAPL'] = {
-                    'status': '✅ SUCCESS',
-                    'price': float(aapl_data['Global Quote']['05. price'])
-                }
-            else:
-                results['control_tests']['AAPL'] = {'status': '❌ UNEXPECTED FORMAT'}
-        else:
-            results['control_tests']['AAPL'] = {'status': f'❌ HTTP {aapl_response.status_code}'}
-    
-    except Exception as e:
-        results['control_tests']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
-    
-    # ========================================================================
-    # API RATE LIMIT INFO
-    # ========================================================================
-    results['api_limits'] = {
-        'free_tier': '25 API calls per day',
-        'note': 'Alpha Vantage free tier includes indices (SPX, VIX)',
-        'upgrade_info': 'Premium plans available at https://www.alphavantage.co/premium/'
+    results['api_key_check'] = {
+        'status': '✅ PRESENT',
+        'length': len(ALPHA_VANTAGE_KEY),
+        'preview': ALPHA_VANTAGE_KEY[:8] + '...'
     }
     
     # ========================================================================
-    # SUMMARY & RECOMMENDATION
+    # TEST SPY (S&P 500 ETF - Official SPX proxy per Alpha Vantage docs)
     # ========================================================================
-    spx_working = any('✅' in str(v) for v in results['spx_tests'].values())
-    vix_working = any('✅' in str(v) for v in results['vix_tests'].values())
-    stocks_working = any('✅' in str(v) for v in results['control_tests'].values())
+    results['spy_tests'] = {}
+    
+    # Method 1: GLOBAL_QUOTE for current price
+    try:
+        print("  [TEST] Fetching SPY via GLOBAL_QUOTE...")
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=SPY&apikey={ALPHA_VANTAGE_KEY}"
+        response = requests.get(url, timeout=10)
+        
+        results['spy_tests']['quote_http_status'] = response.status_code
+        
+        if response.status_code == 200:
+            data = response.json()
+            results['spy_tests']['quote_response'] = data
+            
+            if 'Global Quote' in data and '05. price' in data['Global Quote']:
+                spy_price = float(data['Global Quote']['05. price'])
+                spx_equivalent = spy_price * 10
+                
+                results['spy_tests']['quote_status'] = '✅ SUCCESS'
+                results['spy_tests']['spy_price'] = spy_price
+                results['spy_tests']['spx_equivalent'] = spx_equivalent
+                results['spy_tests']['spy_high'] = float(data['Global Quote']['03. high'])
+                results['spy_tests']['spy_low'] = float(data['Global Quote']['04. low'])
+            elif 'Note' in data:
+                results['spy_tests']['quote_status'] = f"⚠️ RATE LIMITED: {data['Note']}"
+            elif 'Error Message' in data:
+                results['spy_tests']['quote_status'] = f"❌ ERROR: {data['Error Message']}"
+            else:
+                results['spy_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
+        else:
+            results['spy_tests']['quote_status'] = f'❌ HTTP {response.status_code}'
+    
+    except Exception as e:
+        results['spy_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # Add delay to avoid rate limit
+    time_module.sleep(12)  # Free tier = 5 calls/minute max
+    
+    # Method 2: TIME_SERIES_DAILY for historical
+    try:
+        print("  [TEST] Fetching SPY historical via TIME_SERIES_DAILY...")
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&outputsize=compact&apikey={ALPHA_VANTAGE_KEY}"
+        response = requests.get(url, timeout=10)
+        
+        results['spy_tests']['history_http_status'] = response.status_code
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if 'Time Series (Daily)' in data:
+                ts = data['Time Series (Daily)']
+                dates = sorted(list(ts.keys()), reverse=True)
+                
+                results['spy_tests']['history_status'] = '✅ SUCCESS'
+                results['spy_tests']['days_available'] = len(dates)
+                results['spy_tests']['latest_date'] = dates[0]
+                
+                # Get last 10 closes for RV calculation
+                closes = [float(ts[date]['4. close']) for date in dates[:10]]
+                results['spy_tests']['sample_closes'] = closes
+                results['spy_tests']['spx_equivalent_closes'] = [c * 10 for c in closes]
+                
+            elif 'Note' in data:
+                results['spy_tests']['history_status'] = f"⚠️ RATE LIMITED: {data['Note']}"
+            else:
+                results['spy_tests']['history_status'] = '❌ UNEXPECTED FORMAT'
+        else:
+            results['spy_tests']['history_status'] = f'❌ HTTP {response.status_code}'
+    
+    except Exception as e:
+        results['spy_tests']['history_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # Add delay
+    time_module.sleep(12)
+    
+    # ========================================================================
+    # TEST VXX (VIX futures ETF - Official VIX proxy per Alpha Vantage docs)
+    # ========================================================================
+    results['vxx_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching VXX via GLOBAL_QUOTE...")
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=VXX&apikey={ALPHA_VANTAGE_KEY}"
+        response = requests.get(url, timeout=10)
+        
+        results['vxx_tests']['quote_http_status'] = response.status_code
+        
+        if response.status_code == 200:
+            data = response.json()
+            results['vxx_tests']['quote_response'] = data
+            
+            if 'Global Quote' in data and '05. price' in data['Global Quote']:
+                vxx_price = float(data['Global Quote']['05. price'])
+                
+                results['vxx_tests']['quote_status'] = '✅ SUCCESS'
+                results['vxx_tests']['vxx_price'] = vxx_price
+                results['vxx_tests']['note'] = 'VXX tracks VIX futures (correlates with VIX but not exact)'
+            elif 'Note' in data:
+                results['vxx_tests']['quote_status'] = f"⚠️ RATE LIMITED: {data['Note']}"
+            else:
+                results['vxx_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
+        else:
+            results['vxx_tests']['quote_status'] = f'❌ HTTP {response.status_code}'
+    
+    except Exception as e:
+        results['vxx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    spy_working = '✅' in results['spy_tests'].get('quote_status', '')
+    vxx_working = '✅' in results['vxx_tests'].get('quote_status', '')
     
     results['summary'] = {
-        'spx_working': spx_working,
-        'vix_working': vix_working,
-        'stocks_working': stocks_working
+        'spy_working': spy_working,
+        'vxx_working': vxx_working,
+        'spy_history_working': '✅' in results['spy_tests'].get('history_status', '')
     }
     
-    # Check for rate limiting
-    rate_limited = any('RATE LIMITED' in str(v) for v in [results['spx_tests'], results['vix_tests'], results['control_tests']])
-    
-    if rate_limited:
-        results['recommendation'] = '⚠️ RATE LIMITED - You hit the 25 calls/day limit. Wait until tomorrow or upgrade.'
-        results['status'] = 'RATE_LIMITED'
-        results['next_steps'] = 'Wait 24 hours for limit reset OR upgrade at https://www.alphavantage.co/premium/'
-    elif spx_working and vix_working:
-        results['recommendation'] = '✅ ALPHA VANTAGE WORKING - Bot ready to trade!'
+    # Recommendation
+    if spy_working and vxx_working:
+        results['recommendation'] = '✅ ALPHA VANTAGE FREE TIER WORKING with SPY/VXX proxies!'
         results['status'] = 'READY'
-    elif stocks_working and not spx_working:
-        results['recommendation'] = '⚠️ Stocks work but indices (SPX/VIX) failed - Check API limits or response format'
-        results['status'] = 'INDICES_FAILED'
-    elif not stocks_working:
-        results['recommendation'] = '❌ API not working at all - Check API key'
-        results['status'] = 'API_FAILED'
-        results['next_steps'] = 'Verify API key at https://www.alphavantage.co/support/#api-key'
+        results['note'] = 'Can build bot using FREE tier - No premium needed!'
+    elif spy_working:
+        results['recommendation'] = '⚠️ SPY works but VXX failed - Can still use SPY for SPX proxy'
+        results['status'] = 'SPY_ONLY'
     else:
-        results['recommendation'] = '⚠️ Mixed results - Check individual test details above'
-        results['status'] = 'MIXED'
+        results['recommendation'] = '❌ Alpha Vantage not working - Check rate limits or API key'
+        results['status'] = 'FAILED'
+    
+    results['rate_limit_reminder'] = {
+        'free_tier': '25 requests per day, 5 requests per minute',
+        'note': 'This test uses 3 API calls with 12-second delays to avoid rate limit'
+    }
     
     return jsonify(results), 200
+
 
 
 

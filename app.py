@@ -2353,11 +2353,13 @@ def test_marketstack_all():
 
 @app.route("/test_polygon_massive", methods=["GET"])
 def test_polygon_massive():
-    """Test Polygon/Massive API - Check what's available on your plan"""
+    """Test Polygon/Massive API - NEW api.massive.com domain"""
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
         'environment': 'Railway Production',
         'api_provider': 'Polygon (now Massive)',
+        'api_domain': 'api.massive.com (NEW)',
+        'old_domain': 'api.polygon.io (deprecated)',
         'api_website': 'https://polygon.io'
     }
     
@@ -2374,27 +2376,14 @@ def test_polygon_massive():
     }
     
     # ========================================================================
-    # TEST 1: Account status / plan tier
-    # ========================================================================
-    results['account_info'] = {}
-    
-    try:
-        # This endpoint doesn't exist, but error message might reveal plan info
-        status_url = f"https://api.polygon.io/v1/meta/symbols/I:SPX/company?apiKey={POLYGON_KEY}"
-        status_response = requests.get(status_url, timeout=10)
-        results['account_info']['status_check'] = status_response.status_code
-    except:
-        pass
-    
-    # ========================================================================
-    # TEST 2: SPX Index Data (requires paid plan)
+    # TEST 1: SPX Index Data (requires paid plan)
     # ========================================================================
     results['spx_tests'] = {}
     
-    # Try SPX quote
+    # Try SPX quote with NEW domain
     try:
-        print("  [TEST] Fetching SPX (I:SPX)...")
-        quote_url = f"https://api.polygon.io/v2/last/trade/I:SPX?apiKey={POLYGON_KEY}"
+        print("  [TEST] Fetching SPX from api.massive.com...")
+        quote_url = f"https://api.massive.com/v2/last/trade/I:SPX?apiKey={POLYGON_KEY}"
         quote_response = requests.get(quote_url, timeout=10)
         
         results['spx_tests']['quote_http_status'] = quote_response.status_code
@@ -2416,12 +2405,16 @@ def test_polygon_massive():
     
     except Exception as e:
         results['spx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+        import traceback
+        results['spx_tests']['traceback'] = traceback.format_exc()
     
     # Try SPX aggregates (historical)
     try:
         print("  [TEST] Fetching SPX aggregates...")
-        today = datetime.now(ET_TZ).strftime('%Y-%m-%d')
-        agg_url = f"https://api.polygon.io/v2/aggs/ticker/I:SPX/range/1/day/{today}/{today}?adjusted=true&apiKey={POLYGON_KEY}"
+        end_date = datetime.now(ET_TZ)
+        start_date = end_date - timedelta(days=10)
+        
+        agg_url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&apiKey={POLYGON_KEY}"
         agg_response = requests.get(agg_url, timeout=10)
         
         results['spx_tests']['agg_http_status'] = agg_response.status_code
@@ -2430,10 +2423,14 @@ def test_polygon_massive():
             data = agg_response.json()
             if 'results' in data and len(data['results']) > 0:
                 results['spx_tests']['agg_status'] = '✅ SUCCESS'
-                results['spx_tests']['agg_data'] = data['results'][0]
+                results['spx_tests']['days_returned'] = len(data['results'])
+                results['spx_tests']['latest_close'] = data['results'][0].get('c')
+                results['spx_tests']['sample_data'] = data['results'][:2]
             else:
                 results['spx_tests']['agg_status'] = '❌ NO RESULTS'
                 results['spx_tests']['agg_response'] = data
+        elif agg_response.status_code == 403:
+            results['spx_tests']['agg_status'] = '❌ FORBIDDEN (403)'
         else:
             results['spx_tests']['agg_status'] = f'❌ HTTP {agg_response.status_code}'
     
@@ -2441,13 +2438,13 @@ def test_polygon_massive():
         results['spx_tests']['agg_status'] = f'❌ EXCEPTION: {str(e)}'
     
     # ========================================================================
-    # TEST 3: VIX Index Data
+    # TEST 2: VIX Index Data
     # ========================================================================
     results['vix_tests'] = {}
     
     try:
-        print("  [TEST] Fetching VIX (I:VIX)...")
-        vix_url = f"https://api.polygon.io/v2/last/trade/I:VIX?apiKey={POLYGON_KEY}"
+        print("  [TEST] Fetching VIX from api.massive.com...")
+        vix_url = f"https://api.massive.com/v2/last/trade/I:VIX?apiKey={POLYGON_KEY}"
         vix_response = requests.get(vix_url, timeout=10)
         
         results['vix_tests']['quote_http_status'] = vix_response.status_code
@@ -2469,13 +2466,13 @@ def test_polygon_massive():
         results['vix_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
     
     # ========================================================================
-    # TEST 4: SPY (Stock/ETF - should work on free tier)
+    # TEST 3: SPY (Stock/ETF - should work on free tier)
     # ========================================================================
     results['spy_tests'] = {}
     
     try:
-        print("  [TEST] Fetching SPY (stock)...")
-        spy_url = f"https://api.polygon.io/v2/last/trade/SPY?apiKey={POLYGON_KEY}"
+        print("  [TEST] Fetching SPY (stock) from api.massive.com...")
+        spy_url = f"https://api.massive.com/v2/last/trade/SPY?apiKey={POLYGON_KEY}"
         spy_response = requests.get(spy_url, timeout=10)
         
         results['spy_tests']['quote_http_status'] = spy_response.status_code
@@ -2488,6 +2485,7 @@ def test_polygon_massive():
                 results['spy_tests']['spx_equivalent'] = float(data['results']['p']) * 10
             else:
                 results['spy_tests']['quote_status'] = '❌ NO DATA'
+                results['spy_tests']['response'] = data
         else:
             results['spy_tests']['quote_status'] = f'❌ HTTP {spy_response.status_code}'
     
@@ -2495,31 +2493,58 @@ def test_polygon_massive():
         results['spy_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
     
     # ========================================================================
+    # TEST 4: Control - AAPL
+    # ========================================================================
+    results['control_test'] = {}
+    
+    try:
+        print("  [TEST] Fetching AAPL (control)...")
+        aapl_url = f"https://api.massive.com/v2/last/trade/AAPL?apiKey={POLYGON_KEY}"
+        aapl_response = requests.get(aapl_url, timeout=10)
+        
+        if aapl_response.status_code == 200:
+            data = aapl_response.json()
+            if 'results' in data and 'p' in data['results']:
+                results['control_test']['AAPL'] = {
+                    'status': '✅ SUCCESS',
+                    'price': float(data['results']['p'])
+                }
+            else:
+                results['control_test']['AAPL'] = {'status': '❌ NO DATA'}
+        else:
+            results['control_test']['AAPL'] = {'status': f'❌ HTTP {aapl_response.status_code}'}
+    
+    except Exception as e:
+        results['control_test']['AAPL'] = {'status': f'❌ EXCEPTION: {str(e)}'}
+    
+    # ========================================================================
     # SUMMARY
     # ========================================================================
     spx_working = '✅' in results['spx_tests'].get('quote_status', '')
     vix_working = '✅' in results['vix_tests'].get('quote_status', '')
     spy_working = '✅' in results['spy_tests'].get('quote_status', '')
+    stocks_working = '✅' in results['control_test'].get('AAPL', {}).get('status', '')
     
     results['summary'] = {
         'spx_index_access': spx_working,
         'vix_index_access': vix_working,
-        'spy_stock_access': spy_working
+        'spy_stock_access': spy_working,
+        'aapl_stock_access': stocks_working
     }
     
-    # Determine plan tier
+    # Determine plan tier and recommendation
     if spx_working and vix_working:
         results['detected_plan'] = '✅ PAID PLAN (Starter or higher) - Indices included!'
         results['recommendation'] = '✅ POLYGON/MASSIVE READY - Full bot functionality available!'
         results['status'] = 'READY'
-    elif spy_working and not spx_working:
+    elif (spy_working or stocks_working) and not spx_working:
         results['detected_plan'] = '⚠️ FREE PLAN - Stocks/ETFs only, no indices'
-        results['recommendation'] = '⚠️ Need to upgrade to Starter plan ($99/mo) for SPX/VIX access'
+        results['recommendation'] = '⚠️ Need to upgrade to Starter plan ($99/mo) for SPX/VIX access OR use SPY proxy workaround'
         results['status'] = 'FREE_TIER'
         results['upgrade_link'] = 'https://polygon.io/pricing'
     else:
-        results['detected_plan'] = '❌ UNKNOWN - API key might be invalid'
-        results['recommendation'] = '❌ Check API key validity'
+        results['detected_plan'] = '❌ UNKNOWN - API might be invalid or blocked'
+        results['recommendation'] = '❌ Check API key validity at https://polygon.io/dashboard'
         results['status'] = 'INVALID_KEY'
     
     return jsonify(results), 200

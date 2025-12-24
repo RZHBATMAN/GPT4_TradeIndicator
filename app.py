@@ -2351,6 +2351,179 @@ def test_marketstack_all():
     
     return jsonify(results), 200
 
+@app.route("/test_polygon_massive", methods=["GET"])
+def test_polygon_massive():
+    """Test Polygon/Massive API - Check what's available on your plan"""
+    results = {
+        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production',
+        'api_provider': 'Polygon (now Massive)',
+        'api_website': 'https://polygon.io'
+    }
+    
+    # Check if we have key
+    POLYGON_KEY = os.environ.get('POLYGON_API_KEY')
+    
+    if not POLYGON_KEY:
+        return jsonify({'error': 'POLYGON_API_KEY not set'}), 500
+    
+    results['api_key_check'] = {
+        'status': '✅ PRESENT',
+        'length': len(POLYGON_KEY),
+        'preview': POLYGON_KEY[:8] + '...'
+    }
+    
+    # ========================================================================
+    # TEST 1: Account status / plan tier
+    # ========================================================================
+    results['account_info'] = {}
+    
+    try:
+        # This endpoint doesn't exist, but error message might reveal plan info
+        status_url = f"https://api.polygon.io/v1/meta/symbols/I:SPX/company?apiKey={POLYGON_KEY}"
+        status_response = requests.get(status_url, timeout=10)
+        results['account_info']['status_check'] = status_response.status_code
+    except:
+        pass
+    
+    # ========================================================================
+    # TEST 2: SPX Index Data (requires paid plan)
+    # ========================================================================
+    results['spx_tests'] = {}
+    
+    # Try SPX quote
+    try:
+        print("  [TEST] Fetching SPX (I:SPX)...")
+        quote_url = f"https://api.polygon.io/v2/last/trade/I:SPX?apiKey={POLYGON_KEY}"
+        quote_response = requests.get(quote_url, timeout=10)
+        
+        results['spx_tests']['quote_http_status'] = quote_response.status_code
+        results['spx_tests']['quote_response'] = quote_response.json()
+        
+        if quote_response.status_code == 200:
+            data = quote_response.json()
+            if 'results' in data and 'p' in data['results']:
+                results['spx_tests']['quote_status'] = '✅ SUCCESS - YOU HAVE INDEX ACCESS!'
+                results['spx_tests']['spx_price'] = float(data['results']['p'])
+            elif 'status' in data and data['status'] == 'ERROR':
+                results['spx_tests']['quote_status'] = f"❌ ERROR: {data.get('error', 'Unknown')}"
+            else:
+                results['spx_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
+        elif quote_response.status_code == 403:
+            results['spx_tests']['quote_status'] = '❌ FORBIDDEN (403) - Indices require paid plan'
+        else:
+            results['spx_tests']['quote_status'] = f'❌ HTTP {quote_response.status_code}'
+    
+    except Exception as e:
+        results['spx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # Try SPX aggregates (historical)
+    try:
+        print("  [TEST] Fetching SPX aggregates...")
+        today = datetime.now(ET_TZ).strftime('%Y-%m-%d')
+        agg_url = f"https://api.polygon.io/v2/aggs/ticker/I:SPX/range/1/day/{today}/{today}?adjusted=true&apiKey={POLYGON_KEY}"
+        agg_response = requests.get(agg_url, timeout=10)
+        
+        results['spx_tests']['agg_http_status'] = agg_response.status_code
+        
+        if agg_response.status_code == 200:
+            data = agg_response.json()
+            if 'results' in data and len(data['results']) > 0:
+                results['spx_tests']['agg_status'] = '✅ SUCCESS'
+                results['spx_tests']['agg_data'] = data['results'][0]
+            else:
+                results['spx_tests']['agg_status'] = '❌ NO RESULTS'
+                results['spx_tests']['agg_response'] = data
+        else:
+            results['spx_tests']['agg_status'] = f'❌ HTTP {agg_response.status_code}'
+    
+    except Exception as e:
+        results['spx_tests']['agg_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST 3: VIX Index Data
+    # ========================================================================
+    results['vix_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching VIX (I:VIX)...")
+        vix_url = f"https://api.polygon.io/v2/last/trade/I:VIX?apiKey={POLYGON_KEY}"
+        vix_response = requests.get(vix_url, timeout=10)
+        
+        results['vix_tests']['quote_http_status'] = vix_response.status_code
+        results['vix_tests']['quote_response'] = vix_response.json()
+        
+        if vix_response.status_code == 200:
+            data = vix_response.json()
+            if 'results' in data and 'p' in data['results']:
+                results['vix_tests']['quote_status'] = '✅ SUCCESS'
+                results['vix_tests']['vix_value'] = float(data['results']['p'])
+            else:
+                results['vix_tests']['quote_status'] = '❌ NO DATA'
+        elif vix_response.status_code == 403:
+            results['vix_tests']['quote_status'] = '❌ FORBIDDEN (403)'
+        else:
+            results['vix_tests']['quote_status'] = f'❌ HTTP {vix_response.status_code}'
+    
+    except Exception as e:
+        results['vix_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST 4: SPY (Stock/ETF - should work on free tier)
+    # ========================================================================
+    results['spy_tests'] = {}
+    
+    try:
+        print("  [TEST] Fetching SPY (stock)...")
+        spy_url = f"https://api.polygon.io/v2/last/trade/SPY?apiKey={POLYGON_KEY}"
+        spy_response = requests.get(spy_url, timeout=10)
+        
+        results['spy_tests']['quote_http_status'] = spy_response.status_code
+        
+        if spy_response.status_code == 200:
+            data = spy_response.json()
+            if 'results' in data and 'p' in data['results']:
+                results['spy_tests']['quote_status'] = '✅ SUCCESS'
+                results['spy_tests']['spy_price'] = float(data['results']['p'])
+                results['spy_tests']['spx_equivalent'] = float(data['results']['p']) * 10
+            else:
+                results['spy_tests']['quote_status'] = '❌ NO DATA'
+        else:
+            results['spy_tests']['quote_status'] = f'❌ HTTP {spy_response.status_code}'
+    
+    except Exception as e:
+        results['spy_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    spx_working = '✅' in results['spx_tests'].get('quote_status', '')
+    vix_working = '✅' in results['vix_tests'].get('quote_status', '')
+    spy_working = '✅' in results['spy_tests'].get('quote_status', '')
+    
+    results['summary'] = {
+        'spx_index_access': spx_working,
+        'vix_index_access': vix_working,
+        'spy_stock_access': spy_working
+    }
+    
+    # Determine plan tier
+    if spx_working and vix_working:
+        results['detected_plan'] = '✅ PAID PLAN (Starter or higher) - Indices included!'
+        results['recommendation'] = '✅ POLYGON/MASSIVE READY - Full bot functionality available!'
+        results['status'] = 'READY'
+    elif spy_working and not spx_working:
+        results['detected_plan'] = '⚠️ FREE PLAN - Stocks/ETFs only, no indices'
+        results['recommendation'] = '⚠️ Need to upgrade to Starter plan ($99/mo) for SPX/VIX access'
+        results['status'] = 'FREE_TIER'
+        results['upgrade_link'] = 'https://polygon.io/pricing'
+    else:
+        results['detected_plan'] = '❌ UNKNOWN - API key might be invalid'
+        results['recommendation'] = '❌ Check API key validity'
+        results['status'] = 'INVALID_KEY'
+    
+    return jsonify(results), 200
+
 
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))

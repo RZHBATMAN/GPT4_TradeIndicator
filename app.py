@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
 SPX Overnight Vol Premium Bot - Railway Production
-Uses Alpha Vantage FREE tier with SPY/VXX proxies
-Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
+Uses Polygon/Massive Indices Starter ($49/mo) - 15-min delayed data
+Real SPX + VIX1D data (no more proxies!)
 
-Test endpoints available for future API exploration:
-- /test_alpha_spy_vxx (Alpha Vantage - CURRENT)
-- /test_polygon_massive (Polygon/Massive)
-- /test_fmp (Financial Modeling Prep)
-- /test_yahoo (Yahoo Finance)
-- /test_marketstack_all (Marketstack)
+Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
 """
 
 from flask import Flask, jsonify
@@ -28,20 +23,18 @@ import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 
-# Configuration - RAILWAY VERSION
+# Configuration
 ET_TZ = pytz.timezone('US/Eastern')
 
 # Trading windows - PRODUCTION: 2:30-3:30 PM ET
-# Trading windows - TESTING MODE: 24 hours
-# PRODUCTION: 2:30-3:30 PM ET
-TRADING_WINDOW_START = dt_time(hour=0, minute=0)   # Midnight
-TRADING_WINDOW_END = dt_time(hour=23, minute=59)   # 11:59 PM
+TRADING_WINDOW_START = dt_time(hour=14, minute=30)
+TRADING_WINDOW_END = dt_time(hour=23, minute=30)
 
 def load_config():
     """Load configuration from environment variables (Railway)"""
     config = {
         'OPENAI_API_KEY': os.environ.get('OPENAI_API_KEY'),
-        'ALPHA_VANTAGE_KEY': os.environ.get('ALPHA_VANTAGE_KEY'),
+        'POLYGON_API_KEY': os.environ.get('POLYGON_API_KEY'),
         'TRADE_AGGRESSIVE_URL': os.environ.get('TRADE_AGGRESSIVE_URL'),
         'TRADE_NORMAL_URL': os.environ.get('TRADE_NORMAL_URL'),
         'TRADE_CONSERVATIVE_URL': os.environ.get('TRADE_CONSERVATIVE_URL'),
@@ -56,7 +49,7 @@ def load_config():
 
 CONFIG = load_config()
 OPENAI_API_KEY = CONFIG.get('OPENAI_API_KEY')
-ALPHA_VANTAGE_KEY = CONFIG.get('ALPHA_VANTAGE_KEY')
+POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 
 WEBHOOK_URLS = {
     'TRADE_AGGRESSIVE': CONFIG.get('TRADE_AGGRESSIVE_URL'),
@@ -66,7 +59,7 @@ WEBHOOK_URLS = {
 }
 
 # ============================================================================
-# LAYER 1: ALGO DEDUPLICATION - Strong fuzzy matching
+# LAYER 1: ALGO DEDUPLICATION
 # ============================================================================
 
 def normalize_title(title):
@@ -84,10 +77,7 @@ def titles_are_similar(title1, title2, threshold=0.85):
     return similarity >= threshold
 
 def deduplicate_articles_smart(articles):
-    """
-    LAYER 1: Algorithmic deduplication with fuzzy matching
-    Keeps the BEST version (most recent + best source priority)
-    """
+    """LAYER 1: Algorithmic deduplication with fuzzy matching"""
     if not articles:
         return []
     
@@ -142,11 +132,11 @@ def deduplicate_articles_smart(articles):
     return unique
 
 # ============================================================================
-# LAYER 2: KEYWORD FILTER - Remove obvious junk
+# LAYER 2: KEYWORD FILTER
 # ============================================================================
 
 def is_obvious_junk(title, description=""):
-    """LAYER 2: Lenient keyword filter - only remove OBVIOUS junk"""
+    """LAYER 2: Lenient keyword filter"""
     obvious_junk_patterns = [
         r'secret to', r'trick to', r'\d+ ways to', r'you won\'t believe',
         r'shocking', r'amazing', r'incredible',
@@ -200,14 +190,11 @@ def filter_news_lenient(articles, verbose=False):
     return filtered, stats
 
 # ============================================================================
-# NEWS FETCHING - NO FEEDPARSER (Direct HTTP + XML)
+# NEWS FETCHING - NO FEEDPARSER
 # ============================================================================
 
 def parse_rss_feed(url, source_name):
-    """
-    Parse RSS feed using direct HTTP + XML parsing
-    NO FEEDPARSER DEPENDENCY - Works on any Python version
-    """
+    """Parse RSS feed using direct HTTP + XML parsing"""
     try:
         response = requests.get(
             url, 
@@ -216,27 +203,21 @@ def parse_rss_feed(url, source_name):
         )
         response.raise_for_status()
         
-        # Parse XML
         root = ET.fromstring(response.content)
         articles = []
         now = datetime.now(ET_TZ)
         
-        # Find all <item> elements in RSS feed
         for item in root.findall('.//item'):
             try:
-                # Extract title
                 title_elem = item.find('title')
                 title = title_elem.text if title_elem is not None and title_elem.text else 'No title'
                 
-                # Extract link
                 link_elem = item.find('link')
                 link = link_elem.text if link_elem is not None and link_elem.text else ''
                 
-                # Extract description
                 description_elem = item.find('description')
                 description = description_elem.text if description_elem is not None and description_elem.text else ''
                 
-                # Extract and parse publication date
                 pubdate_elem = item.find('pubDate')
                 if pubdate_elem is not None and pubdate_elem.text:
                     try:
@@ -272,7 +253,7 @@ def parse_rss_feed(url, source_name):
         return []
 
 def fetch_yahoo_finance_news():
-    """Source 1: Yahoo Finance RSS (using direct HTTP)"""
+    """Source 1: Yahoo Finance RSS"""
     try:
         rss_feeds = [
             ('https://finance.yahoo.com/news/rssindex', 'Yahoo Finance - Market'),
@@ -298,7 +279,7 @@ def fetch_yahoo_finance_news():
         return []
 
 def fetch_google_news_rss():
-    """Source 2: Google News RSS (using direct HTTP)"""
+    """Source 2: Google News RSS"""
     try:
         queries = [
             'stock+market+OR+S%26P+500',
@@ -321,14 +302,10 @@ def fetch_google_news_rss():
         return []
 
 def fetch_news_multi_source():
-    """
-    Triple-layer news processing:
-    Layer 1: Algo dedup → Layer 2: Keyword filter → Layer 3: GPT (sent below)
-    """
+    """Triple-layer news processing"""
     try:
         all_articles = []
         
-        # Fetch from all sources
         yahoo_articles = fetch_yahoo_finance_news()
         google_articles = fetch_google_news_rss()
         
@@ -351,7 +328,7 @@ def fetch_news_multi_source():
                 }
             }
         
-        # LAYER 1: Strong deduplication
+        # LAYER 1: Deduplication
         unique_articles = deduplicate_articles_smart(all_articles)
         duplicates_removed = raw_count - len(unique_articles)
         
@@ -372,10 +349,9 @@ def fetch_news_multi_source():
                 }
             }
         
-        # Sort by time (most recent first)
         filtered_articles.sort(key=lambda x: x['published_time'], reverse=True)
         
-        # Format for GPT (Layer 3)
+        # Format for GPT
         news_summary = ""
         for article in filtered_articles[:30]:
             time_str = article['published_time'].strftime("%I:%M %p")
@@ -431,185 +407,200 @@ def fetch_news_multi_source():
         }
 
 # ============================================================================
-# DATA FETCHING - ALPHA VANTAGE FREE TIER (SPY/VXX proxies)
+# DATA FETCHING - POLYGON/MASSIVE
 # ============================================================================
 
-def get_spy_data_alpha():
+def get_polygon_snapshot():
     """
-    Fetch SPY data from Alpha Vantage (SPX proxy)
-    SPY × 10 ≈ SPX (official recommendation from Alpha Vantage)
+    Fetch SPX and VIX1D current values from Polygon snapshot
+    Returns 15-min delayed data from Indices Starter plan
     """
     try:
-        print("  [Alpha Vantage] Fetching SPY (SPX proxy)...")
+        print("  [POLYGON] Fetching SPX + VIX1D snapshot...")
         
-        # Get SPY quote
-        quote_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=SPY&apikey={ALPHA_VANTAGE_KEY}"
-        quote_response = requests.get(quote_url, timeout=10)
+        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:SPX,I:VIX1D&apiKey={POLYGON_API_KEY}"
+        response = requests.get(url, timeout=15)
         
-        if quote_response.status_code != 200:
-            print(f"  ❌ Alpha Vantage SPY quote failed: {quote_response.status_code}")
+        if response.status_code != 200:
+            print(f"  ❌ Polygon snapshot failed: {response.status_code}")
             return None
         
-        quote_data = quote_response.json()
+        data = response.json()
         
-        if 'Global Quote' not in quote_data or '05. price' not in quote_data['Global Quote']:
-            print(f"  ❌ No SPY quote data")
+        if 'results' not in data or len(data['results']) == 0:
+            print(f"  ❌ No results in snapshot")
             return None
         
-        spy_price = float(quote_data['Global Quote']['05. price'])
-        spy_high = float(quote_data['Global Quote']['03. high'])
-        spy_low = float(quote_data['Global Quote']['04. low'])
+        # Parse results
+        snapshot_data = {}
         
-        # Convert to SPX equivalent
-        spx_price = spy_price * 10
-        spx_high = spy_high * 10
-        spx_low = spy_low * 10
+        for ticker_data in data['results']:
+            ticker = ticker_data.get('ticker')
+            
+            if 'error' in ticker_data:
+                print(f"  ❌ {ticker}: {ticker_data.get('error')}")
+                continue
+            
+            if ticker == 'I:SPX':
+                snapshot_data['spx'] = {
+                    'current': ticker_data.get('value'),
+                    'session': ticker_data.get('session', {}),
+                    'timeframe': ticker_data.get('timeframe'),
+                    'market_status': ticker_data.get('market_status')
+                }
+            
+            elif ticker == 'I:VIX1D':
+                snapshot_data['vix1d'] = {
+                    'current': ticker_data.get('value'),
+                    'session': ticker_data.get('session', {}),
+                    'timeframe': ticker_data.get('timeframe'),
+                    'market_status': ticker_data.get('market_status')
+                }
         
-        print(f"  ✅ SPY: {spy_price:.2f} → SPX equivalent: {spx_price:.2f}")
-        
-        # Delay to respect rate limit (5 calls/minute = 12 seconds between calls)
-        time_module.sleep(12)
-        
-        # Get SPY historical data
-        hist_url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&outputsize=compact&apikey={ALPHA_VANTAGE_KEY}"
-        hist_response = requests.get(hist_url, timeout=10)
-        
-        if hist_response.status_code != 200:
-            print(f"  ❌ Alpha Vantage SPY history failed: {hist_response.status_code}")
+        # Verify we got both
+        if 'spx' not in snapshot_data or 'vix1d' not in snapshot_data:
+            print(f"  ❌ Missing data: spx={('spx' in snapshot_data)}, vix1d={('vix1d' in snapshot_data)}")
             return None
         
-        hist_data = hist_response.json()
+        print(f"  ✅ SPX: {snapshot_data['spx']['current']:.2f} ({snapshot_data['spx']['timeframe']})")
+        print(f"  ✅ VIX1D: {snapshot_data['vix1d']['current']:.2f} ({snapshot_data['vix1d']['timeframe']})")
         
-        if 'Time Series (Daily)' not in hist_data:
-            print(f"  ❌ No SPY historical data")
-            return None
-        
-        ts = hist_data['Time Series (Daily)']
-        dates = sorted(list(ts.keys()), reverse=True)
-        
-        # Get last 25 closes and convert to SPX equivalent
-        spy_closes = [float(ts[date]['4. close']) for date in dates[:25]]
-        spx_closes = [c * 10 for c in spy_closes]
-        
-        print(f"  ✅ Got {len(spx_closes)} days of SPX historical data (from SPY)")
-        
-        return {
-            'current': spx_price,
-            'high_today': spx_high,
-            'low_today': spx_low,
-            'history_closes': spx_closes
-        }
+        return snapshot_data
         
     except Exception as e:
-        print(f"  ❌ Alpha Vantage SPY error: {e}")
+        print(f"  ❌ Polygon snapshot error: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 
-def get_vxx_data_alpha():
+def get_polygon_aggregates_spx():
     """
-    Fetch VXX data from Alpha Vantage (VIX proxy)
-    VXX = VIX futures ETF (official recommendation from Alpha Vantage)
+    Fetch SPX historical data for RV calculation
+    Returns last 25 days of closes
     """
     try:
-        print("  [Alpha Vantage] Fetching VXX (VIX proxy)...")
+        print("  [POLYGON] Fetching SPX historical data...")
         
-        # Delay before VXX call
-        time_module.sleep(12)
+        end_date = datetime.now(ET_TZ)
+        start_date = end_date - timedelta(days=40)  # Get extra days to ensure 25 trading days
         
-        # Get VXX quote
-        quote_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=VXX&apikey={ALPHA_VANTAGE_KEY}"
-        response = requests.get(quote_url, timeout=10)
+        url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=50&apiKey={POLYGON_API_KEY}"
+        
+        response = requests.get(url, timeout=15)
         
         if response.status_code != 200:
-            print(f"  ❌ Alpha Vantage VXX failed: {response.status_code}")
+            print(f"  ❌ Polygon aggregates failed: {response.status_code}")
             return None
         
         data = response.json()
         
-        if 'Global Quote' not in data or '05. price' not in data['Global Quote']:
-            print(f"  ❌ No VXX quote data")
+        if 'results' not in data or len(data['results']) == 0:
+            print(f"  ❌ No historical data")
             return None
         
-        vxx_value = float(data['Global Quote']['05. price'])
-        print(f"  ✅ VXX: {vxx_value:.2f} (VIX proxy)")
+        # Extract closes
+        closes = [bar['c'] for bar in data['results'][:25]]
         
-        # VXX is roughly 1/4 to 1/5 of VIX, but we'll use it directly
-        # as a volatility indicator for IV/RV ratio
+        print(f"  ✅ Got {len(closes)} days of SPX historical data")
         
-        return {
-            'current': vxx_value,
-            'tenor': 'VXX-based (VIX futures proxy)',
-            'source': 'Alpha_Vantage_VXX',
-            'method': 'Alpha Vantage FREE tier',
-            'note': 'VXX tracks VIX futures, correlates with VIX'
-        }
+        return closes
         
     except Exception as e:
-        print(f"  ❌ Alpha Vantage VXX error: {e}")
+        print(f"  ❌ Polygon aggregates error: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 
 def get_spx_data_with_retry(max_retries=3):
-    """Fetch SPY (SPX proxy) with retry"""
+    """Fetch SPX snapshot + aggregates with retry"""
     for attempt in range(max_retries):
         try:
-            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching SPY (SPX proxy)...")
-            result = get_spy_data_alpha()
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching Polygon data...")
             
-            if result is not None:
-                print(f"  ✅ SPY fetch succeeded on attempt {attempt + 1}")
-                return result
+            # Get snapshot (current values)
+            snapshot = get_polygon_snapshot()
+            if not snapshot:
+                print(f"  ⚠️ Snapshot failed on attempt {attempt + 1}")
+                time_module.sleep(5)
+                continue
             
-            print(f"  ⚠️ Attempt {attempt + 1} returned None, retrying...")
-            time_module.sleep(12)
+            # Get historical data
+            historical_closes = get_polygon_aggregates_spx()
+            if not historical_closes:
+                print(f"  ⚠️ Historical data failed on attempt {attempt + 1}")
+                time_module.sleep(5)
+                continue
+            
+            # Combine data
+            result = {
+                'current': snapshot['spx']['current'],
+                'high_today': snapshot['spx']['session'].get('high'),
+                'low_today': snapshot['spx']['session'].get('low'),
+                'open_today': snapshot['spx']['session'].get('open'),
+                'previous_close': snapshot['spx']['session'].get('previous_close'),
+                'history_closes': historical_closes,
+                'timeframe': snapshot['spx']['timeframe'],
+                'market_status': snapshot['spx']['market_status']
+            }
+            
+            print(f"  ✅ Polygon data fetch succeeded on attempt {attempt + 1}")
+            return result
             
         except Exception as e:
             print(f"  ❌ Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                time_module.sleep(12)
+                time_module.sleep(5)
     
     return None
 
 
-def get_overnight_iv_with_retry(max_retries=3):
-    """Fetch VXX (VIX proxy) with retry"""
+def get_vix1d_with_retry(max_retries=3):
+    """Fetch VIX1D with retry"""
     for attempt in range(max_retries):
         try:
-            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VXX (VIX proxy)...")
-            result = get_vxx_data_alpha()
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VIX1D...")
             
-            if result is not None:
-                print(f"  ✅ VXX fetch succeeded on attempt {attempt + 1}")
-                return result
+            snapshot = get_polygon_snapshot()
+            if not snapshot or 'vix1d' not in snapshot:
+                print(f"  ⚠️ VIX1D failed on attempt {attempt + 1}")
+                time_module.sleep(5)
+                continue
             
-            print(f"  ⚠️ Attempt {attempt + 1} returned None, retrying...")
-            time_module.sleep(12)
+            result = {
+                'current': snapshot['vix1d']['current'],
+                'tenor': '1-day (VIX1D)',
+                'source': 'Polygon_VIX1D',
+                'method': 'Polygon Indices Starter ($49/mo)',
+                'timeframe': snapshot['vix1d']['timeframe'],
+                'session': snapshot['vix1d']['session']
+            }
+            
+            print(f"  ✅ VIX1D fetch succeeded on attempt {attempt + 1}")
+            return result
             
         except Exception as e:
             print(f"  ❌ Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
-                time_module.sleep(12)
+                time_module.sleep(5)
     
     return None
 
 # ============================================================================
-# INDICATOR 1: IV/RV RATIO (30%)
+# INDICATOR 1: IV/RV RATIO (30%) - Using Real VIX1D!
 # ============================================================================
 
-def analyze_iv_rv_ratio(spx_data, iv_data):
+def analyze_iv_rv_ratio(spx_data, vix1d_data):
     """
-    Analyze IV/RV ratio
-    Using VXX as volatility proxy vs 10-day RV
-    Note: VXX ≠ VIX but correlates, so we use it as volatility indicator
+    Analyze IV/RV ratio using REAL VIX1D (1-day forward implied vol)
+    VIX1D = 1-day forward implied volatility (perfect for overnight strategy!)
+    RV = 10-day realized volatility
     """
-    # Use 10-day RV
-    closes = spx_data['history_closes'][-11:]  # Last 11 days to get 10 returns
     
-    # Calculate realized volatility
+    # Calculate 10-day Realized Volatility
+    closes = spx_data['history_closes'][:11]  # Need 11 days to get 10 returns
+    
     returns = []
     for i in range(1, len(closes)):
         daily_return = math.log(closes[i] / closes[i-1])
@@ -619,18 +610,15 @@ def analyze_iv_rv_ratio(spx_data, iv_data):
     squared_diffs = [(r - mean_return)**2 for r in returns]
     variance = sum(squared_diffs) / (len(returns) - 1)
     daily_std = math.sqrt(variance)
-    realized_vol = daily_std * math.sqrt(252) * 100
+    realized_vol = daily_std * math.sqrt(252) * 100  # Annualized RV
     
-    # VXX as volatility indicator (not exact VIX, but proxy)
-    vxx_value = iv_data['current']
+    # VIX1D = 1-day forward implied volatility (already in percentage terms)
+    implied_vol = vix1d_data['current']
     
-    # VXX typically ranges 15-50, VIX ranges 10-80
-    # Rough conversion: VIX ≈ VXX * 0.6 (very approximate)
-    implied_vol_estimate = vxx_value * 0.6
+    # IV/RV ratio
+    iv_rv_ratio = implied_vol / realized_vol
     
-    iv_rv_ratio = implied_vol_estimate / realized_vol
-    
-    # Scoring logic (same as before)
+    # Scoring logic
     if iv_rv_ratio > 1.35:
         base_score = 1
     elif iv_rv_ratio > 1.20:
@@ -648,7 +636,7 @@ def analyze_iv_rv_ratio(spx_data, iv_data):
     
     # RV change modifier
     if len(spx_data['history_closes']) >= 21:
-        closes_earlier = spx_data['history_closes'][-21:-10]
+        closes_earlier = spx_data['history_closes'][10:21]
         returns_earlier = []
         for i in range(1, len(closes_earlier)):
             returns_earlier.append(math.log(closes_earlier[i] / closes_earlier[i-1]))
@@ -676,11 +664,11 @@ def analyze_iv_rv_ratio(spx_data, iv_data):
     return {
         'score': final_score,
         'realized_vol': round(realized_vol, 2),
-        'implied_vol': round(implied_vol_estimate, 2),
+        'implied_vol': round(implied_vol, 2),
         'iv_rv_ratio': round(iv_rv_ratio, 3),
-        'vxx_value': round(vxx_value, 2),
-        'tenor': iv_data.get('tenor', 'VXX-based'),
-        'source': 'Alpha_Vantage_VXX_proxy',
+        'vix1d_value': round(implied_vol, 2),
+        'tenor': '1-day (VIX1D)',
+        'source': 'Polygon VIX1D (real data)',
         'rv_change': round(rv_change, 3)
     }
 
@@ -692,7 +680,7 @@ def analyze_market_trend(spx_data):
     """Analyze 5-day momentum and intraday volatility"""
     current = spx_data['current']
     closes = spx_data['history_closes']
-    spx_5d_ago = closes[-6] if len(closes) >= 6 else current
+    spx_5d_ago = closes[5] if len(closes) >= 6 else current
     
     change_5d = (current - spx_5d_ago) / spx_5d_ago
     
@@ -731,16 +719,11 @@ def analyze_market_trend(spx_data):
     }
 
 # ============================================================================
-# INDICATOR 3: GPT NEWS ANALYSIS (50%) - LAYER 3
+# INDICATOR 3: GPT NEWS ANALYSIS (50%)
 # ============================================================================
 
 def analyze_gpt_news(news_data):
-    """
-    LAYER 3: GPT Triple-Duty Analysis
-    1. Duplication safety net (if algo missed any)
-    2. Filter commentary/old news
-    3. Analyze overnight risk
-    """
+    """LAYER 3: GPT analysis"""
     
     if news_data['count'] == 0:
         return {
@@ -1028,14 +1011,14 @@ def send_webhook(signal_data):
         return {'success': False}
 
 def is_within_trading_window(now=None):
-    """PRODUCTION: Check if within 2:30-3:30 PM ET trading window"""
+    """Check if within 2:30-3:30 PM ET trading window"""
     if now is None:
         now = datetime.now(ET_TZ)
     current_time = now.time()
     return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
 
 # ============================================================================
-# FLASK ROUTES - MAIN ENDPOINTS
+# FLASK ROUTES
 # ============================================================================
 
 @app.route("/", methods=["GET"])
@@ -1048,7 +1031,7 @@ def homepage():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Ren's SPX Vol Signal (Production)</title>
+        <title>Ren's SPX Vol Signal</title>
         <style>
             body {{
                 font-family: 'Segoe UI', sans-serif;
@@ -1167,8 +1150,8 @@ def homepage():
         <div class="container">
             <div class="header">
                 <h1>📊 Ren's SPX Vol Signal</h1>
-                <div class="subtitle">Automated SPX Overnight Iron Condor Decision System (Production)</div>
-                <div class="status">LIVE ON RAILWAY - FREE TIER</div>
+                <div class="subtitle">Automated SPX Overnight Iron Condor Decision System</div>
+                <div class="status">PRODUCTION - RAILWAY</div>
             </div>
             
             <div class="strategy-box">
@@ -1185,7 +1168,7 @@ def homepage():
                 <div class="edge-item">
                     <div class="edge-label">🔍 Signal Components (3 Indicators):</div>
                     <div class="edge-desc">
-                        <strong>1. IV/RV Ratio (30%):</strong> VXX-based volatility vs 10-day realized vol.<br>
+                        <strong>1. IV/RV Ratio (30%):</strong> Real VIX1D (1-day forward IV) vs 10-day realized vol.<br>
                         <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
                         <strong>3. GPT News Analysis (50%):</strong> Triple-layer filtering (Algo dedup → Keyword → GPT).
                     </div>
@@ -1218,15 +1201,15 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">Data Source:</span>
-                    <span class="info-value">Alpha Vantage FREE tier (SPY/VXX proxies)</span>
+                    <span class="info-value">Polygon/Massive Indices Starter ($49/mo)</span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">SPX Proxy:</span>
-                    <span class="info-value">SPY × 10 (official Alpha Vantage recommendation)</span>
+                    <span class="info-label">SPX Data:</span>
+                    <span class="info-value">Real I:SPX (15-min delayed)</span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">VIX Proxy:</span>
-                    <span class="info-value">VXX (VIX futures ETF)</span>
+                    <span class="info-label">VIX Data:</span>
+                    <span class="info-value">Real I:VIX1D (1-day forward implied vol)</span>
                 </div>
             </div>
             
@@ -1234,11 +1217,7 @@ def homepage():
                 <div class="section-title">🔗 API Endpoints</div>
                 <div class="endpoint"><a href="/health">/health</a> - Health check</div>
                 <div class="endpoint"><a href="/option_alpha_trigger">/option_alpha_trigger</a> - Generate trading signal</div>
-                <div class="endpoint"><a href="/test_alpha_spy_vxx">/test_alpha_spy_vxx</a> - Test Alpha Vantage (current)</div>
-                <div class="endpoint"><a href="/test_polygon_massive">/test_polygon_massive</a> - Test Polygon/Massive</div>
-                <div class="endpoint"><a href="/test_fmp">/test_fmp</a> - Test Financial Modeling Prep</div>
-                <div class="endpoint"><a href="/test_yahoo">/test_yahoo</a> - Test Yahoo Finance</div>
-                <div class="endpoint"><a href="/test_marketstack_all">/test_marketstack_all</a> - Test Marketstack</div>
+                <div class="endpoint"><a href="/test_polygon_delayed">/test_polygon_delayed</a> - Test Polygon data</div>
             </div>
         </div>
     </body>
@@ -1256,9 +1235,9 @@ def health_check():
         "environment": "production",
         "trading_window": "2:30-3:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
-        "data_source": "Alpha Vantage FREE tier",
-        "spx_proxy": "SPY × 10",
-        "vix_proxy": "VXX (VIX futures ETF)"
+        "data_source": "Polygon/Massive Indices Starter ($49/mo)",
+        "spx_data": "Real I:SPX (15-min delayed)",
+        "vix_data": "Real I:VIX1D (1-day forward IV)"
     }), 200
 
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
@@ -1278,16 +1257,17 @@ def option_alpha_trigger():
         }), 200
     
     try:
-        print(f"[{timestamp}] Fetching market data...")
+        print(f"[{timestamp}] Fetching market data from Polygon...")
         
-        # Use Alpha Vantage with retry
+        # Fetch SPX data (snapshot + aggregates)
         spx_data = get_spx_data_with_retry(max_retries=3)
         if not spx_data:
-            return jsonify({"status": "error", "message": "SPY failed after 3 retries (Alpha Vantage)"}), 500
+            return jsonify({"status": "error", "message": "SPX data failed after 3 retries (Polygon)"}), 500
         
-        iv_data = get_overnight_iv_with_retry(max_retries=3)
-        if not iv_data:
-            return jsonify({"status": "error", "message": "VXX failed after 3 retries (Alpha Vantage)"}), 500
+        # Fetch VIX1D data
+        vix1d_data = get_vix1d_with_retry(max_retries=3)
+        if not vix1d_data:
+            return jsonify({"status": "error", "message": "VIX1D data failed after 3 retries (Polygon)"}), 500
         
         # Fetch news
         news_data = fetch_news_multi_source()
@@ -1295,7 +1275,7 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Running indicators...")
         
         # Run indicators
-        iv_rv = analyze_iv_rv_ratio(spx_data, iv_data)
+        iv_rv = analyze_iv_rv_ratio(spx_data, vix1d_data)
         trend = analyze_market_trend(spx_data)
         gpt = analyze_gpt_news(news_data)
         
@@ -1354,8 +1334,9 @@ def option_alpha_trigger():
                 "spx_current": spx_data['current'],
                 "spx_high": spx_data['high_today'],
                 "spx_low": spx_data['low_today'],
-                "vxx_current": iv_data['current'],
-                "data_source": "Alpha Vantage FREE (SPY/VXX proxies)"
+                "vix1d_current": vix1d_data['current'],
+                "data_source": "Polygon/Massive Indices Starter ($49/mo)",
+                "timeframe": spx_data.get('timeframe', 'DELAYED')
             },
             
             "indicator_1_iv_rv": {
@@ -1364,9 +1345,9 @@ def option_alpha_trigger():
                 "iv_rv_ratio": iv_rv['iv_rv_ratio'],
                 "realized_vol": f"{iv_rv['realized_vol']}%",
                 "implied_vol": f"{iv_rv['implied_vol']}%",
-                "vxx_value": iv_rv['vxx_value'],
-                "tenor": iv_rv['tenor'],
-                "source": "Alpha Vantage VXX proxy"
+                "vix1d_value": iv_rv['vix1d_value'],
+                "tenor": "1-day (VIX1D)",
+                "source": "Polygon VIX1D (real data)"
             },
             
             "indicator_2_trend": {
@@ -1416,163 +1397,9 @@ def option_alpha_trigger():
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ============================================================================
-# FLASK ROUTES - TEST ENDPOINTS (For future API exploration)
-# ============================================================================
-
-@app.route("/test_alpha_spy_vxx", methods=["GET"])
-def test_alpha_spy_vxx():
-    """Test Alpha Vantage FREE tier with SPY/VXX (CURRENT PRODUCTION API)"""
-    results = {
-        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
-        'environment': 'Railway Production',
-        'api_provider': 'Alpha Vantage',
-        'plan': 'FREE tier',
-        'strategy': 'Use SPY (SPX proxy) and VXX (VIX proxy) - Official recommendation'
-    }
-    
-    if not ALPHA_VANTAGE_KEY:
-        return jsonify({'error': 'ALPHA_VANTAGE_KEY not set'}), 500
-    
-    results['api_key_check'] = {
-        'status': '✅ PRESENT',
-        'length': len(ALPHA_VANTAGE_KEY),
-        'preview': ALPHA_VANTAGE_KEY[:8] + '...'
-    }
-    
-    # Test SPY
-    results['spy_tests'] = {}
-    
-    try:
-        print("  [TEST] Fetching SPY via GLOBAL_QUOTE...")
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=SPY&apikey={ALPHA_VANTAGE_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        results['spy_tests']['quote_http_status'] = response.status_code
-        
-        if response.status_code == 200:
-            data = response.json()
-            results['spy_tests']['quote_response'] = data
-            
-            if 'Global Quote' in data and '05. price' in data['Global Quote']:
-                spy_price = float(data['Global Quote']['05. price'])
-                spx_equivalent = spy_price * 10
-                
-                results['spy_tests']['quote_status'] = '✅ SUCCESS'
-                results['spy_tests']['spy_price'] = spy_price
-                results['spy_tests']['spx_equivalent'] = spx_equivalent
-                results['spy_tests']['spy_high'] = float(data['Global Quote']['03. high'])
-                results['spy_tests']['spy_low'] = float(data['Global Quote']['04. low'])
-            elif 'Note' in data:
-                results['spy_tests']['quote_status'] = f"⚠️ RATE LIMITED: {data['Note']}"
-            elif 'Error Message' in data:
-                results['spy_tests']['quote_status'] = f"❌ ERROR: {data['Error Message']}"
-            else:
-                results['spy_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
-        else:
-            results['spy_tests']['quote_status'] = f'❌ HTTP {response.status_code}'
-    
-    except Exception as e:
-        results['spy_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    time_module.sleep(12)
-    
-    # Test SPY historical
-    try:
-        print("  [TEST] Fetching SPY historical via TIME_SERIES_DAILY...")
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&outputsize=compact&apikey={ALPHA_VANTAGE_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        results['spy_tests']['history_http_status'] = response.status_code
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if 'Time Series (Daily)' in data:
-                ts = data['Time Series (Daily)']
-                dates = sorted(list(ts.keys()), reverse=True)
-                
-                results['spy_tests']['history_status'] = '✅ SUCCESS'
-                results['spy_tests']['days_available'] = len(dates)
-                results['spy_tests']['latest_date'] = dates[0]
-                
-                closes = [float(ts[date]['4. close']) for date in dates[:10]]
-                results['spy_tests']['sample_closes'] = closes
-                results['spy_tests']['spx_equivalent_closes'] = [c * 10 for c in closes]
-                
-            elif 'Note' in data:
-                results['spy_tests']['history_status'] = f"⚠️ RATE LIMITED: {data['Note']}"
-            else:
-                results['spy_tests']['history_status'] = '❌ UNEXPECTED FORMAT'
-        else:
-            results['spy_tests']['history_status'] = f'❌ HTTP {response.status_code}'
-    
-    except Exception as e:
-        results['spy_tests']['history_status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    time_module.sleep(12)
-    
-    # Test VXX
-    results['vxx_tests'] = {}
-    
-    try:
-        print("  [TEST] Fetching VXX via GLOBAL_QUOTE...")
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=VXX&apikey={ALPHA_VANTAGE_KEY}"
-        response = requests.get(url, timeout=10)
-        
-        results['vxx_tests']['quote_http_status'] = response.status_code
-        
-        if response.status_code == 200:
-            data = response.json()
-            results['vxx_tests']['quote_response'] = data
-            
-            if 'Global Quote' in data and '05. price' in data['Global Quote']:
-                vxx_price = float(data['Global Quote']['05. price'])
-                
-                results['vxx_tests']['quote_status'] = '✅ SUCCESS'
-                results['vxx_tests']['vxx_price'] = vxx_price
-                results['vxx_tests']['note'] = 'VXX tracks VIX futures (correlates with VIX but not exact)'
-            elif 'Note' in data:
-                results['vxx_tests']['quote_status'] = f"⚠️ RATE LIMITED: {data['Note']}"
-            else:
-                results['vxx_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
-        else:
-            results['vxx_tests']['quote_status'] = f'❌ HTTP {response.status_code}'
-    
-    except Exception as e:
-        results['vxx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    # Summary
-    spy_working = '✅' in results['spy_tests'].get('quote_status', '')
-    vxx_working = '✅' in results['vxx_tests'].get('quote_status', '')
-    
-    results['summary'] = {
-        'spy_working': spy_working,
-        'vxx_working': vxx_working,
-        'spy_history_working': '✅' in results['spy_tests'].get('history_status', '')
-    }
-    
-    if spy_working and vxx_working:
-        results['recommendation'] = '✅ ALPHA VANTAGE FREE TIER WORKING - PRODUCTION READY!'
-        results['status'] = 'READY'
-    elif spy_working:
-        results['recommendation'] = '⚠️ SPY works but VXX failed'
-        results['status'] = 'SPY_ONLY'
-    else:
-        results['recommendation'] = '❌ Alpha Vantage not working'
-        results['status'] = 'FAILED'
-    
-    results['rate_limit_reminder'] = {
-        'free_tier': '25 requests per day, 5 requests per minute',
-        'note': 'This test uses 3 API calls with 12-second delays'
-    }
-    
-    return jsonify(results), 200
-
-
 @app.route("/test_polygon_delayed", methods=["GET"])
 def test_polygon_delayed():
-    """Test Polygon Indices Starter - SPX and VIX1D (official endpoints)"""
+    """Test Polygon Indices Starter - SPX and VIX1D (15-min delayed)"""
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
         'plan': 'Indices Starter ($49/mo) - 15-min delayed',
@@ -1584,15 +1411,10 @@ def test_polygon_delayed():
     if not POLYGON_KEY:
         return jsonify({'error': 'No API key'}), 500
     
-    # ========================================================================
-    # METHOD 1: v3 Snapshot (OFFICIAL - should give 15-min delayed quotes)
-    # ========================================================================
+    # v3 Snapshot
     results['v3_snapshot'] = {}
     
     try:
-        print("  [SNAPSHOT] Fetching SPX + VIX1D via v3/snapshot/indices...")
-        
-        # Query both tickers at once (comma-separated)
         url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:SPX,I:VIX1D&apiKey={POLYGON_KEY}"
         response = requests.get(url, timeout=15)
         
@@ -1606,11 +1428,9 @@ def test_polygon_delayed():
                 results['v3_snapshot']['status'] = '✅ SUCCESS'
                 results['v3_snapshot']['count'] = len(data['results'])
                 
-                # Parse each ticker
                 for ticker_data in data['results']:
                     ticker = ticker_data.get('ticker')
                     
-                    # Check for errors
                     if 'error' in ticker_data:
                         results['v3_snapshot'][ticker] = {
                             'status': f"❌ ERROR: {ticker_data.get('error')}",
@@ -1618,7 +1438,6 @@ def test_polygon_delayed():
                         }
                         continue
                     
-                    # Parse successful response
                     if ticker == 'I:SPX':
                         results['v3_snapshot']['SPX'] = {
                             'status': '✅ FOUND',
@@ -1643,29 +1462,19 @@ def test_polygon_delayed():
             else:
                 results['v3_snapshot']['status'] = '❌ NO RESULTS'
         
-        elif response.status_code == 403:
-            results['v3_snapshot']['status'] = '❌ FORBIDDEN (403) - Not entitled to snapshot data'
-        
         else:
             results['v3_snapshot']['status'] = f'❌ HTTP {response.status_code}'
     
     except Exception as e:
         results['v3_snapshot']['status'] = f'❌ EXCEPTION: {str(e)}'
-        import traceback
-        results['v3_snapshot']['traceback'] = traceback.format_exc()
     
-    # ========================================================================
-    # METHOD 2: v2 Aggregates - SPX (for historical RV calculation)
-    # ========================================================================
+    # v2 Aggregates - SPX
     results['v2_aggregates_spx'] = {}
     
     try:
-        print("  [AGGREGATES] Fetching SPX historical data...")
-        
         end_date = datetime.now(ET_TZ)
         start_date = end_date - timedelta(days=30)
         
-        # Official format: /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
         url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=50&apiKey={POLYGON_KEY}"
         
         response = requests.get(url, timeout=15)
@@ -1680,7 +1489,6 @@ def test_polygon_delayed():
                 results['v2_aggregates_spx']['count'] = data.get('queryCount', len(data['results']))
                 results['v2_aggregates_spx']['ticker'] = data.get('ticker')
                 
-                # Get latest bar
                 latest = data['results'][0]
                 results['v2_aggregates_spx']['latest'] = {
                     'close': latest.get('c'),
@@ -1690,7 +1498,6 @@ def test_polygon_delayed():
                     'timestamp': latest.get('t')
                 }
                 
-                # Get closes for RV calculation (last 10 days)
                 closes = [bar['c'] for bar in data['results'][:10]]
                 results['v2_aggregates_spx']['sample_closes'] = closes
                 results['v2_aggregates_spx']['days_for_rv'] = len(closes)
@@ -1698,23 +1505,16 @@ def test_polygon_delayed():
             else:
                 results['v2_aggregates_spx']['status'] = '❌ NO RESULTS'
         
-        elif response.status_code == 403:
-            results['v2_aggregates_spx']['status'] = '❌ FORBIDDEN (403)'
-        
         else:
             results['v2_aggregates_spx']['status'] = f'❌ HTTP {response.status_code}'
     
     except Exception as e:
         results['v2_aggregates_spx']['status'] = f'❌ EXCEPTION: {str(e)}'
     
-    # ========================================================================
-    # METHOD 3: v2 Aggregates - VIX1D (if needed for historical)
-    # ========================================================================
+    # v2 Aggregates - VIX1D
     results['v2_aggregates_vix1d'] = {}
     
     try:
-        print("  [AGGREGATES] Fetching VIX1D historical data...")
-        
         end_date = datetime.now(ET_TZ)
         start_date = end_date - timedelta(days=10)
         
@@ -1740,16 +1540,10 @@ def test_polygon_delayed():
     except Exception as e:
         results['v2_aggregates_vix1d']['status'] = f'❌ EXCEPTION: {str(e)}'
     
-    # ========================================================================
-    # SUMMARY & RECOMMENDATION
-    # ========================================================================
-    
-    # Check if snapshot worked
+    # Summary
     snapshot_worked = results['v3_snapshot'].get('status') == '✅ SUCCESS'
     spx_in_snapshot = 'SPX' in results['v3_snapshot'] and results['v3_snapshot']['SPX'].get('status') == '✅ FOUND'
     vix1d_in_snapshot = 'VIX1D' in results['v3_snapshot'] and results['v3_snapshot']['VIX1D'].get('status') == '✅ FOUND'
-    
-    # Check if aggregates worked
     spx_agg_worked = results['v2_aggregates_spx'].get('status') == '✅ SUCCESS'
     vix1d_agg_worked = results['v2_aggregates_vix1d'].get('status') == '✅ SUCCESS'
     
@@ -1761,7 +1555,6 @@ def test_polygon_delayed():
         'vix1d_aggregates_working': vix1d_agg_worked
     }
     
-    # Determine if ready for bot
     if spx_in_snapshot and vix1d_in_snapshot and spx_agg_worked:
         results['recommendation'] = '✅ POLYGON FULLY READY!'
         results['status'] = 'READY'
@@ -1772,122 +1565,14 @@ def test_polygon_delayed():
         }
         results['next_step'] = 'Ready to build production script with Polygon!'
     
-    elif spx_agg_worked and not spx_in_snapshot:
-        results['recommendation'] = '⚠️ Historical works but snapshot failed - May need to wait for subscription to activate'
-        results['status'] = 'PARTIAL'
-        results['next_step'] = 'Wait 30 minutes or contact Polygon support'
-    
     else:
-        results['recommendation'] = '❌ Polygon not working - Check subscription or contact support'
-        results['status'] = 'FAILED'
-        results['next_step'] = 'Contact support@polygon.io'
-    
-    return jsonify(results), 200
-
-
-@app.route("/test_fmp", methods=["GET"])
-def test_fmp():
-    """Test Financial Modeling Prep API (for future reference)"""
-    results = {
-        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
-        'api_provider': 'Financial Modeling Prep',
-        'note': 'Test endpoint preserved for future API exploration'
-    }
-    
-    FMP_KEY = os.environ.get('FMP_API_KEY')
-    
-    if not FMP_KEY:
-        results['status'] = 'NO_API_KEY'
-        results['message'] = 'FMP_API_KEY not set in environment variables'
-        return jsonify(results), 200
-    
-    results['api_key_check'] = {
-        'status': '✅ PRESENT',
-        'preview': FMP_KEY[:8] + '...'
-    }
-    
-    # Quick test
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/quote/AAPL?apikey={FMP_KEY}"
-        response = requests.get(url, timeout=10)
-        results['test_response'] = {
-            'http_status': response.status_code,
-            'data': response.json()
-        }
-    except Exception as e:
-        results['test_response'] = {'error': str(e)}
-    
-    return jsonify(results), 200
-
-
-@app.route("/test_yahoo", methods=["GET"])
-def test_yahoo():
-    """Test Yahoo Finance (for future reference)"""
-    results = {
-        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
-        'api_provider': 'Yahoo Finance (yfinance)',
-        'note': 'Test endpoint preserved for future - Yahoo blocked on Railway currently'
-    }
-    
-    try:
-        import yfinance as yf
-        results['yfinance_version'] = yf.__version__
-        
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        })
-        
-        spy = yf.Ticker("SPY", session=session)
-        hist = spy.history(period="5d")
-        
-        results['spy_test'] = {
-            'status': '✅ SUCCESS' if not hist.empty else '❌ EMPTY',
-            'length': len(hist)
-        }
-        
-    except Exception as e:
-        results['error'] = str(e)
-    
-    return jsonify(results), 200
-
-
-@app.route("/test_marketstack_all", methods=["GET"])
-def test_marketstack_all():
-    """Test Marketstack API (for future reference)"""
-    results = {
-        'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
-        'api_provider': 'Marketstack',
-        'note': 'Test endpoint preserved for future API exploration'
-    }
-    
-    MARKETSTACK_KEY = os.environ.get('MARKETSTACK_KEY')
-    
-    if not MARKETSTACK_KEY:
-        results['status'] = 'NO_API_KEY'
-        results['message'] = 'MARKETSTACK_KEY not set in environment variables'
-        return jsonify(results), 200
-    
-    results['api_key_check'] = {
-        'status': '✅ PRESENT',
-        'preview': MARKETSTACK_KEY[:8] + '...'
-    }
-    
-    # Quick test
-    try:
-        url = f"http://api.marketstack.com/v1/eod?access_key={MARKETSTACK_KEY}&symbols=AAPL&limit=5"
-        response = requests.get(url, timeout=10)
-        results['test_response'] = {
-            'http_status': response.status_code,
-            'data': response.json()
-        }
-    except Exception as e:
-        results['test_response'] = {'error': str(e)}
+        results['recommendation'] = '⚠️ Partial access'
+        results['status'] = 'PARTIAL'
     
     return jsonify(results), 200
 
 # ============================================================================
-# BACKGROUND THREAD - Auto-trigger during trading hours
+# BACKGROUND THREAD
 # ============================================================================
 
 def poke_self():
@@ -1921,13 +1606,13 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
     
     print("=" * 80)
-    print("Ren's SPX Vol Signal - Production (Alpha Vantage FREE tier)")
+    print("Ren's SPX Vol Signal - Production (Polygon/Massive)")
     print("=" * 80)
     print(f"Port: {PORT}")
     print(f"Trading Window: 2:30-3:30 PM ET")
-    print(f"Data Source: Alpha Vantage FREE tier (SPY/VXX proxies)")
-    print(f"SPX Proxy: SPY × 10")
-    print(f"VIX Proxy: VXX (VIX futures ETF)")
+    print(f"Data Source: Polygon/Massive Indices Starter ($49/mo)")
+    print(f"SPX: Real I:SPX (15-min delayed)")
+    print(f"VIX: Real I:VIX1D (1-day forward implied vol)")
     print("=" * 80)
     
     # Start background thread

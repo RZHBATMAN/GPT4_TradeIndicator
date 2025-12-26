@@ -1572,12 +1572,13 @@ def test_alpha_spy_vxx():
 
 @app.route("/test_polygon_massive", methods=["GET"])
 def test_polygon_massive():
-    """Test Polygon/Massive API (for future reference)"""
+    """Test Polygon/Massive API - COMPREHENSIVE VIX TICKER TEST"""
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
+        'environment': 'Railway Production',
         'api_provider': 'Polygon (now Massive)',
         'api_domain': 'api.massive.com',
-        'note': 'Test endpoint preserved for future API exploration'
+        'note': 'Testing ALL possible VIX ticker formats'
     }
     
     POLYGON_KEY = os.environ.get('POLYGON_API_KEY')
@@ -1589,19 +1590,239 @@ def test_polygon_massive():
     
     results['api_key_check'] = {
         'status': '✅ PRESENT',
+        'length': len(POLYGON_KEY),
         'preview': POLYGON_KEY[:8] + '...'
     }
     
-    # Quick test
+    # ========================================================================
+    # TEST 1: SPX INDEX (I:SPX)
+    # ========================================================================
+    results['spx_tests'] = {}
+    
     try:
-        url = f"https://api.massive.com/v2/last/trade/SPY?apiKey={POLYGON_KEY}"
-        response = requests.get(url, timeout=10)
-        results['test_response'] = {
-            'http_status': response.status_code,
-            'data': response.json()
-        }
+        print("  [TEST] Fetching SPX (I:SPX) quote...")
+        quote_url = f"https://api.massive.com/v2/last/trade/I:SPX?apiKey={POLYGON_KEY}"
+        quote_response = requests.get(quote_url, timeout=10)
+        
+        results['spx_tests']['quote_http_status'] = quote_response.status_code
+        results['spx_tests']['quote_response'] = quote_response.json()
+        
+        if quote_response.status_code == 200:
+            data = quote_response.json()
+            
+            if 'status' in data and data['status'] == 'NOT_AUTHORIZED':
+                results['spx_tests']['quote_status'] = '❌ NOT_AUTHORIZED - Upgrade not active yet'
+            elif 'results' in data and 'p' in data['results']:
+                results['spx_tests']['quote_status'] = '✅ SUCCESS - SPX INDEX ACCESS CONFIRMED!'
+                results['spx_tests']['spx_price'] = float(data['results']['p'])
+                results['spx_tests']['spx_size'] = data['results'].get('s', 'N/A')
+                results['spx_tests']['timestamp'] = data['results'].get('t', 'N/A')
+            else:
+                results['spx_tests']['quote_status'] = '❌ UNEXPECTED FORMAT'
+        elif quote_response.status_code == 403:
+            results['spx_tests']['quote_status'] = '❌ FORBIDDEN (403) - Indices not included in plan'
+        else:
+            results['spx_tests']['quote_status'] = f'❌ HTTP {quote_response.status_code}'
+    
     except Exception as e:
-        results['test_response'] = {'error': str(e)}
+        results['spx_tests']['quote_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # SPX Aggregates
+    try:
+        print("  [TEST] Fetching SPX aggregates...")
+        end_date = datetime.now(ET_TZ)
+        start_date = end_date - timedelta(days=30)
+        
+        agg_url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&apiKey={POLYGON_KEY}"
+        agg_response = requests.get(agg_url, timeout=10)
+        
+        results['spx_tests']['agg_http_status'] = agg_response.status_code
+        
+        if agg_response.status_code == 200:
+            data = agg_response.json()
+            
+            if 'results' in data and len(data['results']) > 0:
+                results['spx_tests']['agg_status'] = '✅ SUCCESS'
+                results['spx_tests']['days_returned'] = len(data['results'])
+                results['spx_tests']['latest_close'] = data['results'][0].get('c')
+                closes = [bar['c'] for bar in data['results'][:10]]
+                results['spx_tests']['sample_closes'] = closes
+            else:
+                results['spx_tests']['agg_status'] = '❌ NO RESULTS'
+        elif agg_response.status_code == 403:
+            results['spx_tests']['agg_status'] = '❌ FORBIDDEN (403)'
+        else:
+            results['spx_tests']['agg_status'] = f'❌ HTTP {agg_response.status_code}'
+    
+    except Exception as e:
+        results['spx_tests']['agg_status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # TEST 2: ALL VIX TICKER VARIANTS - COMPREHENSIVE
+    # ========================================================================
+    results['vix_ticker_tests'] = {}
+    
+    # All possible VIX ticker formats
+    vix_tickers = [
+        # Standard VIX
+        'I:VIX',          # Most common format
+        'VIX',            # Without I: prefix
+        '^VIX',           # Yahoo Finance format
+        '$VIX',           # Some platforms use $
+        
+        # 1-day VIX variants
+        'I:VIX1D',        # 1-day VIX
+        'VIX1D',          # Without prefix
+        'I:VIX9D',        # 9-day VIX (sometimes called 1D)
+        'VIX9D',
+        
+        # Short-term VIX variants
+        'I:VXST',         # Very short-term (9-day)
+        'VXST',
+        'I:VIX3M',        # 3-month VIX
+        'VIX3M',
+        'I:VIX6M',        # 6-month VIX
+        'VIX6M',
+        
+        # Term structure
+        'I:VVIX',         # Volatility of VIX
+        'VVIX',
+        
+        # Other volatility indices
+        'I:VXN',          # NASDAQ volatility
+        'VXN',
+        'I:RVX',          # Russell 2000 volatility
+        'RVX',
+        'I:VXD',          # Dow Jones volatility
+        'VXD',
+        
+        # Additional formats
+        'I:VIX.X',        # Some APIs use .X suffix
+        'VIX.X',
+        'I:CBOE:VIX',     # Exchange prefix
+        'CBOE:VIX',
+    ]
+    
+    working_tickers = []
+    
+    for ticker in vix_tickers:
+        try:
+            print(f"  [TEST VIX] Trying {ticker}...")
+            url = f"https://api.massive.com/v2/last/trade/{ticker}?apiKey={POLYGON_KEY}"
+            response = requests.get(url, timeout=10)
+            
+            test_result = {
+                'http_status': response.status_code,
+            }
+            
+            if response.status_code == 200:
+                data = response.json()
+                test_result['response'] = data
+                
+                if 'status' in data and data['status'] == 'NOT_AUTHORIZED':
+                    test_result['status'] = '❌ NOT_AUTHORIZED'
+                elif 'status' in data and data['status'] == 'ERROR':
+                    test_result['status'] = f"❌ ERROR: {data.get('error', 'Unknown')}"
+                elif 'results' in data and 'p' in data['results']:
+                    test_result['status'] = '✅ SUCCESS'
+                    test_result['value'] = float(data['results']['p'])
+                    test_result['timestamp'] = data['results'].get('t', 'N/A')
+                    test_result['size'] = data['results'].get('s', 'N/A')
+                    working_tickers.append({
+                        'ticker': ticker,
+                        'value': test_result['value']
+                    })
+                else:
+                    test_result['status'] = '❌ NO DATA'
+            elif response.status_code == 404:
+                test_result['status'] = '❌ NOT FOUND (404) - Symbol does not exist'
+            elif response.status_code == 403:
+                test_result['status'] = '❌ FORBIDDEN (403)'
+                test_result['response'] = response.json()
+            else:
+                test_result['status'] = f'❌ HTTP {response.status_code}'
+                try:
+                    test_result['response'] = response.json()
+                except:
+                    test_result['response'] = response.text[:200]
+            
+            results['vix_ticker_tests'][ticker] = test_result
+            
+            # Small delay to avoid rate limiting
+            time_module.sleep(0.2)
+        
+        except Exception as e:
+            results['vix_ticker_tests'][ticker] = {
+                'status': f'❌ EXCEPTION: {str(e)}'
+            }
+    
+    # ========================================================================
+    # TEST 3: Control - SPY stock
+    # ========================================================================
+    results['control_test'] = {}
+    
+    try:
+        print("  [TEST] Fetching SPY (control)...")
+        spy_url = f"https://api.massive.com/v2/last/trade/SPY?apiKey={POLYGON_KEY}"
+        spy_response = requests.get(spy_url, timeout=10)
+        
+        if spy_response.status_code == 200:
+            data = spy_response.json()
+            if 'results' in data and 'p' in data['results']:
+                results['control_test']['SPY'] = {
+                    'status': '✅ SUCCESS',
+                    'price': float(data['results']['p'])
+                }
+            else:
+                results['control_test']['SPY'] = {'status': '❌ NO DATA'}
+        else:
+            results['control_test']['SPY'] = {'status': f'❌ HTTP {spy_response.status_code}'}
+    
+    except Exception as e:
+        results['control_test']['SPY'] = {'status': f'❌ EXCEPTION: {str(e)}'}
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    spx_working = '✅' in results['spx_tests'].get('quote_status', '')
+    spy_working = '✅' in results['control_test'].get('SPY', {}).get('status', '')
+    
+    results['summary'] = {
+        'spx_index_access': spx_working,
+        'spy_stock_access': spy_working,
+        'working_vix_tickers': working_tickers,
+        'total_vix_tickers_tested': len(vix_tickers),
+        'working_vix_count': len(working_tickers)
+    }
+    
+    # Recommendation
+    if spx_working and len(working_tickers) > 0:
+        results['recommendation'] = f'✅ POLYGON/MASSIVE READY - SPX + {len(working_tickers)} VIX ticker(s) working!'
+        results['status'] = 'READY'
+        results['best_vix_ticker'] = working_tickers[0]['ticker'] if working_tickers else None
+        
+        # Prioritize VIX1D if available
+        vix1d_options = [t for t in working_tickers if '1D' in t['ticker'] or '9D' in t['ticker']]
+        if vix1d_options:
+            results['recommended_vix_ticker'] = vix1d_options[0]['ticker']
+            results['note'] = f"Use {vix1d_options[0]['ticker']} for 1-day volatility (best for overnight strategy)"
+        else:
+            results['recommended_vix_ticker'] = working_tickers[0]['ticker']
+            results['note'] = f"Use {working_tickers[0]['ticker']} for volatility data"
+    
+    elif spx_working and len(working_tickers) == 0:
+        results['recommendation'] = '⚠️ SPX works but NO VIX tickers found - May need to check Polygon docs'
+        results['status'] = 'VIX_MISSING'
+    
+    elif spy_working and not spx_working:
+        results['recommendation'] = '⚠️ Stocks work but indices failed - Wait 10 min for upgrade OR generate new API key'
+        results['status'] = 'INDICES_BLOCKED'
+    
+    else:
+        results['recommendation'] = '❌ API not working - Check API key and plan'
+        results['status'] = 'FAILED'
+    
+    results['polygon_docs'] = 'https://polygon.io/docs/indices/getting-started'
     
     return jsonify(results), 200
 

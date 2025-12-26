@@ -28,7 +28,7 @@ ET_TZ = pytz.timezone('US/Eastern')
 
 # Trading windows - PRODUCTION: 2:30-3:30 PM ET
 TRADING_WINDOW_START = dt_time(hour=14, minute=30)
-TRADING_WINDOW_END = dt_time(hour=23, minute=30)
+TRADING_WINDOW_END = dt_time(hour=15, minute=30)
 
 def load_config():
     """Load configuration from environment variables (Railway)"""
@@ -1057,7 +1057,7 @@ def is_within_trading_window(now=None):
 
 @app.route("/", methods=["GET"])
 def homepage():
-    """Homepage"""
+    """Homepage - Concise, Professional, Holistic"""
     now = datetime.now(ET_TZ)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     
@@ -1128,7 +1128,7 @@ def homepage():
                 font-weight: 600;
                 color: #475569;
                 display: inline-block;
-                min-width: 150px;
+                min-width: 180px;
             }}
             .info-value {{
                 color: #1e293b;
@@ -1227,23 +1227,35 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">Trading Window:</span>
-                    <span class="info-value">2:30 PM - 3:30 PM ET (Production)</span>
+                    <span class="info-value">2:30 PM - 3:30 PM ET</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">Environment:</span>
                     <span class="info-value">Railway Production</span>
                 </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">📡 Data Sources</div>
                 <div class="info-item">
-                    <span class="info-label">Data Source:</span>
+                    <span class="info-label">Market Data Provider:</span>
                     <span class="info-value">Polygon/Massive Indices Starter ($49/mo)</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">SPX Data:</span>
-                    <span class="info-value">Real I:SPX (15-min delayed)</span>
+                    <span class="info-value">Real I:SPX snapshot + aggregates (15-min delayed)</span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">VIX Data:</span>
-                    <span class="info-value">Real I:VIX1D (1-day forward implied vol)</span>
+                    <span class="info-label">VIX1D Data:</span>
+                    <span class="info-value">Real I:VIX1D snapshot (15-min delayed, 1-day forward IV)</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">News Sources:</span>
+                    <span class="info-value">Yahoo Finance RSS + Google News RSS (FREE)</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">AI Analysis:</span>
+                    <span class="info-value">GPT-4 Turbo (OpenAI)</span>
                 </div>
             </div>
             
@@ -1269,9 +1281,10 @@ def health_check():
         "environment": "production",
         "trading_window": "2:30-3:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
-        "data_source": "Polygon/Massive Indices Starter ($49/mo)",
+        "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
+        "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
         "spx_data": "Real I:SPX (15-min delayed)",
-        "vix_data": "Real I:VIX1D (1-day forward IV)"
+        "vix_data": "Real I:VIX1D (15-min delayed, 1-day forward IV)"
     }), 200
 
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
@@ -1514,9 +1527,10 @@ if __name__ == "__main__":
     print("=" * 80)
     print(f"Port: {PORT}")
     print(f"Trading Window: 2:30-3:30 PM ET")
-    print(f"Data Source: Polygon/Massive Indices Starter ($49/mo)")
+    print(f"Market Data: Polygon/Massive Indices Starter ($49/mo)")
+    print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")
-    print(f"VIX: Real I:VIX1D (1-day forward implied vol)")
+    print(f"VIX1D: Real I:VIX1D (15-min delayed, 1-day forward IV)")
     print("=" * 80)
     
     # Start background thread

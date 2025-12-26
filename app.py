@@ -407,99 +407,132 @@ def fetch_news_multi_source():
         }
 
 # ============================================================================
-# DATA FETCHING - POLYGON/MASSIVE
+# DATA FETCHING - POLYGON/MASSIVE (SEGREGATED - NO DUPLICATION)
 # ============================================================================
 
-def get_polygon_snapshot():
+def get_spx_snapshot():
     """
-    Fetch SPX and VIX1D current values from Polygon snapshot
+    Fetch ONLY SPX current value from Polygon snapshot
     Returns 15-min delayed data from Indices Starter plan
     """
     try:
-        print("  [POLYGON] Fetching SPX + VIX1D snapshot...")
+        print("  [POLYGON] Fetching SPX snapshot...")
         
-        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:SPX,I:VIX1D&apiKey={POLYGON_API_KEY}"
+        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:SPX&apiKey={POLYGON_API_KEY}"
         response = requests.get(url, timeout=15)
         
         if response.status_code != 200:
-            print(f"  ❌ Polygon snapshot failed: {response.status_code}")
+            print(f"  ❌ SPX snapshot failed: {response.status_code}")
             return None
         
         data = response.json()
         
         if 'results' not in data or len(data['results']) == 0:
-            print(f"  ❌ No results in snapshot")
+            print(f"  ❌ No SPX results in snapshot")
             return None
         
-        # Parse results
-        snapshot_data = {}
+        ticker_data = data['results'][0]
         
-        for ticker_data in data['results']:
-            ticker = ticker_data.get('ticker')
-            
-            if 'error' in ticker_data:
-                print(f"  ❌ {ticker}: {ticker_data.get('error')}")
-                continue
-            
-            if ticker == 'I:SPX':
-                snapshot_data['spx'] = {
-                    'current': ticker_data.get('value'),
-                    'session': ticker_data.get('session', {}),
-                    'timeframe': ticker_data.get('timeframe'),
-                    'market_status': ticker_data.get('market_status')
-                }
-            
-            elif ticker == 'I:VIX1D':
-                snapshot_data['vix1d'] = {
-                    'current': ticker_data.get('value'),
-                    'session': ticker_data.get('session', {}),
-                    'timeframe': ticker_data.get('timeframe'),
-                    'market_status': ticker_data.get('market_status')
-                }
-        
-        # Verify we got both
-        if 'spx' not in snapshot_data or 'vix1d' not in snapshot_data:
-            print(f"  ❌ Missing data: spx={('spx' in snapshot_data)}, vix1d={('vix1d' in snapshot_data)}")
+        if 'error' in ticker_data:
+            print(f"  ❌ SPX error: {ticker_data.get('error')}")
             return None
         
-        print(f"  ✅ SPX: {snapshot_data['spx']['current']:.2f} ({snapshot_data['spx']['timeframe']})")
-        print(f"  ✅ VIX1D: {snapshot_data['vix1d']['current']:.2f} ({snapshot_data['vix1d']['timeframe']})")
+        if ticker_data.get('ticker') != 'I:SPX':
+            print(f"  ❌ Unexpected ticker: {ticker_data.get('ticker')}")
+            return None
         
-        return snapshot_data
+        spx_snapshot = {
+            'current': ticker_data.get('value'),
+            'session': ticker_data.get('session', {}),
+            'timeframe': ticker_data.get('timeframe'),
+            'market_status': ticker_data.get('market_status')
+        }
+        
+        print(f"  ✅ SPX: {spx_snapshot['current']:.2f} ({spx_snapshot['timeframe']})")
+        
+        return spx_snapshot
         
     except Exception as e:
-        print(f"  ❌ Polygon snapshot error: {e}")
+        print(f"  ❌ SPX snapshot error: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 
-def get_polygon_aggregates_spx():
+def get_vix1d_snapshot():
     """
-    Fetch SPX historical data for RV calculation
+    Fetch ONLY VIX1D current value from Polygon snapshot
+    Returns 15-min delayed data from Indices Starter plan
+    """
+    try:
+        print("  [POLYGON] Fetching VIX1D snapshot...")
+        
+        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:VIX1D&apiKey={POLYGON_API_KEY}"
+        response = requests.get(url, timeout=15)
+        
+        if response.status_code != 200:
+            print(f"  ❌ VIX1D snapshot failed: {response.status_code}")
+            return None
+        
+        data = response.json()
+        
+        if 'results' not in data or len(data['results']) == 0:
+            print(f"  ❌ No VIX1D results in snapshot")
+            return None
+        
+        ticker_data = data['results'][0]
+        
+        if 'error' in ticker_data:
+            print(f"  ❌ VIX1D error: {ticker_data.get('error')}")
+            return None
+        
+        if ticker_data.get('ticker') != 'I:VIX1D':
+            print(f"  ❌ Unexpected ticker: {ticker_data.get('ticker')}")
+            return None
+        
+        vix1d_snapshot = {
+            'current': ticker_data.get('value'),
+            'session': ticker_data.get('session', {}),
+            'timeframe': ticker_data.get('timeframe'),
+            'market_status': ticker_data.get('market_status')
+        }
+        
+        print(f"  ✅ VIX1D: {vix1d_snapshot['current']:.2f} ({vix1d_snapshot['timeframe']})")
+        
+        return vix1d_snapshot
+        
+    except Exception as e:
+        print(f"  ❌ VIX1D snapshot error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_spx_aggregates():
+    """
+    Fetch ONLY SPX historical data for RV calculation
     Returns last 25 days of closes
     """
     try:
         print("  [POLYGON] Fetching SPX historical data...")
         
         end_date = datetime.now(ET_TZ)
-        start_date = end_date - timedelta(days=40)  # Get extra days to ensure 25 trading days
+        start_date = end_date - timedelta(days=40)
         
         url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=50&apiKey={POLYGON_API_KEY}"
         
         response = requests.get(url, timeout=15)
         
         if response.status_code != 200:
-            print(f"  ❌ Polygon aggregates failed: {response.status_code}")
+            print(f"  ❌ SPX aggregates failed: {response.status_code}")
             return None
         
         data = response.json()
         
         if 'results' not in data or len(data['results']) == 0:
-            print(f"  ❌ No historical data")
+            print(f"  ❌ No SPX historical data")
             return None
         
-        # Extract closes
         closes = [bar['c'] for bar in data['results'][:25]]
         
         print(f"  ✅ Got {len(closes)} days of SPX historical data")
@@ -507,7 +540,7 @@ def get_polygon_aggregates_spx():
         return closes
         
     except Exception as e:
-        print(f"  ❌ Polygon aggregates error: {e}")
+        print(f"  ❌ SPX aggregates error: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -517,35 +550,35 @@ def get_spx_data_with_retry(max_retries=3):
     """Fetch SPX snapshot + aggregates with retry"""
     for attempt in range(max_retries):
         try:
-            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching Polygon data...")
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching SPX data...")
             
-            # Get snapshot (current values)
-            snapshot = get_polygon_snapshot()
+            # Get snapshot (current value)
+            snapshot = get_spx_snapshot()
             if not snapshot:
-                print(f"  ⚠️ Snapshot failed on attempt {attempt + 1}")
+                print(f"  ⚠️ SPX snapshot failed on attempt {attempt + 1}")
                 time_module.sleep(5)
                 continue
             
             # Get historical data
-            historical_closes = get_polygon_aggregates_spx()
+            historical_closes = get_spx_aggregates()
             if not historical_closes:
-                print(f"  ⚠️ Historical data failed on attempt {attempt + 1}")
+                print(f"  ⚠️ SPX historical data failed on attempt {attempt + 1}")
                 time_module.sleep(5)
                 continue
             
             # Combine data
             result = {
-                'current': snapshot['spx']['current'],
-                'high_today': snapshot['spx']['session'].get('high'),
-                'low_today': snapshot['spx']['session'].get('low'),
-                'open_today': snapshot['spx']['session'].get('open'),
-                'previous_close': snapshot['spx']['session'].get('previous_close'),
+                'current': snapshot['current'],
+                'high_today': snapshot['session'].get('high'),
+                'low_today': snapshot['session'].get('low'),
+                'open_today': snapshot['session'].get('open'),
+                'previous_close': snapshot['session'].get('previous_close'),
                 'history_closes': historical_closes,
-                'timeframe': snapshot['spx']['timeframe'],
-                'market_status': snapshot['spx']['market_status']
+                'timeframe': snapshot['timeframe'],
+                'market_status': snapshot['market_status']
             }
             
-            print(f"  ✅ Polygon data fetch succeeded on attempt {attempt + 1}")
+            print(f"  ✅ SPX data fetch succeeded on attempt {attempt + 1}")
             return result
             
         except Exception as e:
@@ -560,24 +593,25 @@ def get_vix1d_with_retry(max_retries=3):
     """Fetch VIX1D with retry"""
     for attempt in range(max_retries):
         try:
-            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VIX1D...")
+            print(f"  [Attempt {attempt + 1}/{max_retries}] Fetching VIX1D data...")
             
-            snapshot = get_polygon_snapshot()
-            if not snapshot or 'vix1d' not in snapshot:
-                print(f"  ⚠️ VIX1D failed on attempt {attempt + 1}")
+            # Get snapshot
+            snapshot = get_vix1d_snapshot()
+            if not snapshot:
+                print(f"  ⚠️ VIX1D snapshot failed on attempt {attempt + 1}")
                 time_module.sleep(5)
                 continue
             
             result = {
-                'current': snapshot['vix1d']['current'],
+                'current': snapshot['current'],
                 'tenor': '1-day (VIX1D)',
                 'source': 'Polygon_VIX1D',
                 'method': 'Polygon Indices Starter ($49/mo)',
-                'timeframe': snapshot['vix1d']['timeframe'],
-                'session': snapshot['vix1d']['session']
+                'timeframe': snapshot['timeframe'],
+                'session': snapshot['session']
             }
             
-            print(f"  ✅ VIX1D fetch succeeded on attempt {attempt + 1}")
+            print(f"  ✅ VIX1D data fetch succeeded on attempt {attempt + 1}")
             return result
             
         except Exception as e:
@@ -610,7 +644,7 @@ def analyze_iv_rv_ratio(spx_data, vix1d_data):
     squared_diffs = [(r - mean_return)**2 for r in returns]
     variance = sum(squared_diffs) / (len(returns) - 1)
     daily_std = math.sqrt(variance)
-    realized_vol = daily_std * math.sqrt(252) * 100  # Annualized RV
+    realized_vol = daily_std * math.sqrt(252) * 100
     
     # VIX1D = 1-day forward implied volatility (already in percentage terms)
     implied_vol = vix1d_data['current']
@@ -1406,167 +1440,37 @@ def test_polygon_delayed():
         'note': 'Using official v3 snapshot + v2 aggregates endpoints'
     }
     
-    POLYGON_KEY = os.environ.get('POLYGON_API_KEY')
-    
-    if not POLYGON_KEY:
+    if not POLYGON_API_KEY:
         return jsonify({'error': 'No API key'}), 500
     
-    # v3 Snapshot
-    results['v3_snapshot'] = {}
-    
-    try:
-        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:SPX,I:VIX1D&apiKey={POLYGON_KEY}"
-        response = requests.get(url, timeout=15)
-        
-        results['v3_snapshot']['http_status'] = response.status_code
-        results['v3_snapshot']['response'] = response.json()
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if 'results' in data and len(data['results']) > 0:
-                results['v3_snapshot']['status'] = '✅ SUCCESS'
-                results['v3_snapshot']['count'] = len(data['results'])
-                
-                for ticker_data in data['results']:
-                    ticker = ticker_data.get('ticker')
-                    
-                    if 'error' in ticker_data:
-                        results['v3_snapshot'][ticker] = {
-                            'status': f"❌ ERROR: {ticker_data.get('error')}",
-                            'message': ticker_data.get('message', '')
-                        }
-                        continue
-                    
-                    if ticker == 'I:SPX':
-                        results['v3_snapshot']['SPX'] = {
-                            'status': '✅ FOUND',
-                            'value': ticker_data.get('value'),
-                            'name': ticker_data.get('name'),
-                            'timeframe': ticker_data.get('timeframe'),
-                            'market_status': ticker_data.get('market_status'),
-                            'last_updated': ticker_data.get('last_updated'),
-                            'session': ticker_data.get('session', {})
-                        }
-                    
-                    elif ticker == 'I:VIX1D':
-                        results['v3_snapshot']['VIX1D'] = {
-                            'status': '✅ FOUND',
-                            'value': ticker_data.get('value'),
-                            'name': ticker_data.get('name'),
-                            'timeframe': ticker_data.get('timeframe'),
-                            'market_status': ticker_data.get('market_status'),
-                            'last_updated': ticker_data.get('last_updated'),
-                            'session': ticker_data.get('session', {})
-                        }
-            else:
-                results['v3_snapshot']['status'] = '❌ NO RESULTS'
-        
-        else:
-            results['v3_snapshot']['status'] = f'❌ HTTP {response.status_code}'
-    
-    except Exception as e:
-        results['v3_snapshot']['status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    # v2 Aggregates - SPX
-    results['v2_aggregates_spx'] = {}
-    
-    try:
-        end_date = datetime.now(ET_TZ)
-        start_date = end_date - timedelta(days=30)
-        
-        url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=50&apiKey={POLYGON_KEY}"
-        
-        response = requests.get(url, timeout=15)
-        
-        results['v2_aggregates_spx']['http_status'] = response.status_code
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if 'results' in data and len(data['results']) > 0:
-                results['v2_aggregates_spx']['status'] = '✅ SUCCESS'
-                results['v2_aggregates_spx']['count'] = data.get('queryCount', len(data['results']))
-                results['v2_aggregates_spx']['ticker'] = data.get('ticker')
-                
-                latest = data['results'][0]
-                results['v2_aggregates_spx']['latest'] = {
-                    'close': latest.get('c'),
-                    'open': latest.get('o'),
-                    'high': latest.get('h'),
-                    'low': latest.get('l'),
-                    'timestamp': latest.get('t')
-                }
-                
-                closes = [bar['c'] for bar in data['results'][:10]]
-                results['v2_aggregates_spx']['sample_closes'] = closes
-                results['v2_aggregates_spx']['days_for_rv'] = len(closes)
-            
-            else:
-                results['v2_aggregates_spx']['status'] = '❌ NO RESULTS'
-        
-        else:
-            results['v2_aggregates_spx']['status'] = f'❌ HTTP {response.status_code}'
-    
-    except Exception as e:
-        results['v2_aggregates_spx']['status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    # v2 Aggregates - VIX1D
-    results['v2_aggregates_vix1d'] = {}
-    
-    try:
-        end_date = datetime.now(ET_TZ)
-        start_date = end_date - timedelta(days=10)
-        
-        url = f"https://api.massive.com/v2/aggs/ticker/I:VIX1D/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=10&apiKey={POLYGON_KEY}"
-        
-        response = requests.get(url, timeout=15)
-        
-        results['v2_aggregates_vix1d']['http_status'] = response.status_code
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if 'results' in data and len(data['results']) > 0:
-                results['v2_aggregates_vix1d']['status'] = '✅ SUCCESS'
-                results['v2_aggregates_vix1d']['latest_close'] = data['results'][0].get('c')
-                results['v2_aggregates_vix1d']['days_returned'] = len(data['results'])
-            else:
-                results['v2_aggregates_vix1d']['status'] = '❌ NO RESULTS'
-        
-        else:
-            results['v2_aggregates_vix1d']['status'] = f'❌ HTTP {response.status_code}'
-    
-    except Exception as e:
-        results['v2_aggregates_vix1d']['status'] = f'❌ EXCEPTION: {str(e)}'
-    
-    # Summary
-    snapshot_worked = results['v3_snapshot'].get('status') == '✅ SUCCESS'
-    spx_in_snapshot = 'SPX' in results['v3_snapshot'] and results['v3_snapshot']['SPX'].get('status') == '✅ FOUND'
-    vix1d_in_snapshot = 'VIX1D' in results['v3_snapshot'] and results['v3_snapshot']['VIX1D'].get('status') == '✅ FOUND'
-    spx_agg_worked = results['v2_aggregates_spx'].get('status') == '✅ SUCCESS'
-    vix1d_agg_worked = results['v2_aggregates_vix1d'].get('status') == '✅ SUCCESS'
-    
-    results['summary'] = {
-        'snapshot_api_working': snapshot_worked,
-        'spx_snapshot_available': spx_in_snapshot,
-        'vix1d_snapshot_available': vix1d_in_snapshot,
-        'spx_aggregates_working': spx_agg_worked,
-        'vix1d_aggregates_working': vix1d_agg_worked
+    # Test SPX snapshot
+    spx_snapshot = get_spx_snapshot()
+    results['spx_snapshot'] = {
+        'status': '✅ SUCCESS' if spx_snapshot else '❌ FAILED',
+        'data': spx_snapshot
     }
     
-    if spx_in_snapshot and vix1d_in_snapshot and spx_agg_worked:
+    # Test VIX1D snapshot
+    vix1d_snapshot = get_vix1d_snapshot()
+    results['vix1d_snapshot'] = {
+        'status': '✅ SUCCESS' if vix1d_snapshot else '❌ FAILED',
+        'data': vix1d_snapshot
+    }
+    
+    # Test SPX aggregates
+    spx_agg = get_spx_aggregates()
+    results['spx_aggregates'] = {
+        'status': '✅ SUCCESS' if spx_agg else '❌ FAILED',
+        'days_returned': len(spx_agg) if spx_agg else 0,
+        'sample_closes': spx_agg[:5] if spx_agg else []
+    }
+    
+    # Summary
+    if spx_snapshot and vix1d_snapshot and spx_agg:
         results['recommendation'] = '✅ POLYGON FULLY READY!'
         results['status'] = 'READY'
-        results['data_available'] = {
-            'spx_current': f"Via snapshot (timeframe: {results['v3_snapshot']['SPX'].get('timeframe')})",
-            'vix1d_current': f"Via snapshot (timeframe: {results['v3_snapshot']['VIX1D'].get('timeframe')})",
-            'spx_historical': 'Via aggregates (for RV calculation)'
-        }
-        results['next_step'] = 'Ready to build production script with Polygon!'
-    
     else:
-        results['recommendation'] = '⚠️ Partial access'
+        results['recommendation'] = '⚠️ Some data failed'
         results['status'] = 'PARTIAL'
     
     return jsonify(results), 200

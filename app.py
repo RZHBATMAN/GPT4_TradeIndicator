@@ -1570,262 +1570,217 @@ def test_alpha_spy_vxx():
     return jsonify(results), 200
 
 
-@app.route("/test_polygon_massive", methods=["GET"])
-def test_polygon_massive():
-    """Test Polygon/Massive API - Using Official Search Format"""
+@app.route("/test_polygon_delayed", methods=["GET"])
+def test_polygon_delayed():
+    """Test Polygon Indices Starter - SPX and VIX1D (official endpoints)"""
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
-        'environment': 'Railway Production',
-        'api_provider': 'Polygon (now Massive)',
-        'api_domain': 'api.massive.com',
-        'api_version': 'v3',
-        'note': 'Using official search format from Polygon website'
+        'plan': 'Indices Starter ($49/mo) - 15-min delayed',
+        'note': 'Using official v3 snapshot + v2 aggregates endpoints'
     }
     
     POLYGON_KEY = os.environ.get('POLYGON_API_KEY')
     
     if not POLYGON_KEY:
-        results['status'] = 'NO_API_KEY'
-        return jsonify(results), 200
-    
-    results['api_key_check'] = {
-        'status': '✅ PRESENT',
-        'preview': POLYGON_KEY[:8] + '...'
-    }
+        return jsonify({'error': 'No API key'}), 500
     
     # ========================================================================
-    # STEP 1: SEARCH for available index tickers
+    # METHOD 1: v3 Snapshot (OFFICIAL - should give 15-min delayed quotes)
     # ========================================================================
-    results['available_indices'] = {}
+    results['v3_snapshot'] = {}
     
     try:
-        print("  [SEARCH] Finding all available indices...")
-        search_url = f"https://api.massive.com/v3/reference/tickers?market=indices&active=true&limit=1000&apiKey={POLYGON_KEY}"
-        search_response = requests.get(search_url, timeout=15)
+        print("  [SNAPSHOT] Fetching SPX + VIX1D via v3/snapshot/indices...")
         
-        results['available_indices']['search_http_status'] = search_response.status_code
+        # Query both tickers at once (comma-separated)
+        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:SPX,I:VIX1D&apiKey={POLYGON_KEY}"
+        response = requests.get(url, timeout=15)
         
-        if search_response.status_code == 200:
-            data = search_response.json()
+        results['v3_snapshot']['http_status'] = response.status_code
+        results['v3_snapshot']['response'] = response.json()
+        
+        if response.status_code == 200:
+            data = response.json()
             
             if 'results' in data and len(data['results']) > 0:
-                results['available_indices']['search_status'] = '✅ SUCCESS'
-                results['available_indices']['total_indices_found'] = len(data['results'])
+                results['v3_snapshot']['status'] = '✅ SUCCESS'
+                results['v3_snapshot']['count'] = len(data['results'])
                 
-                # Extract all tickers
-                all_tickers = [t['ticker'] for t in data['results']]
-                results['available_indices']['all_tickers'] = all_tickers
-                
-                # Find SPX variants
-                spx_tickers = [t for t in all_tickers if 'SPX' in t or 'S&P' in t]
-                results['available_indices']['spx_variants'] = spx_tickers
-                
-                # Find VIX variants
-                vix_tickers = [t for t in all_tickers if 'VIX' in t]
-                results['available_indices']['vix_variants'] = vix_tickers
-                
+                # Parse each ticker
+                for ticker_data in data['results']:
+                    ticker = ticker_data.get('ticker')
+                    
+                    # Check for errors
+                    if 'error' in ticker_data:
+                        results['v3_snapshot'][ticker] = {
+                            'status': f"❌ ERROR: {ticker_data.get('error')}",
+                            'message': ticker_data.get('message', '')
+                        }
+                        continue
+                    
+                    # Parse successful response
+                    if ticker == 'I:SPX':
+                        results['v3_snapshot']['SPX'] = {
+                            'status': '✅ FOUND',
+                            'value': ticker_data.get('value'),
+                            'name': ticker_data.get('name'),
+                            'timeframe': ticker_data.get('timeframe'),
+                            'market_status': ticker_data.get('market_status'),
+                            'last_updated': ticker_data.get('last_updated'),
+                            'session': ticker_data.get('session', {})
+                        }
+                    
+                    elif ticker == 'I:VIX1D':
+                        results['v3_snapshot']['VIX1D'] = {
+                            'status': '✅ FOUND',
+                            'value': ticker_data.get('value'),
+                            'name': ticker_data.get('name'),
+                            'timeframe': ticker_data.get('timeframe'),
+                            'market_status': ticker_data.get('market_status'),
+                            'last_updated': ticker_data.get('last_updated'),
+                            'session': ticker_data.get('session', {})
+                        }
             else:
-                results['available_indices']['search_status'] = '❌ NO INDICES FOUND'
+                results['v3_snapshot']['status'] = '❌ NO RESULTS'
         
-        elif search_response.status_code == 403:
-            results['available_indices']['search_status'] = '❌ FORBIDDEN (403) - Indices not in plan'
-            results['available_indices']['response'] = search_response.json()
+        elif response.status_code == 403:
+            results['v3_snapshot']['status'] = '❌ FORBIDDEN (403) - Not entitled to snapshot data'
         
         else:
-            results['available_indices']['search_status'] = f'❌ HTTP {search_response.status_code}'
+            results['v3_snapshot']['status'] = f'❌ HTTP {response.status_code}'
     
     except Exception as e:
-        results['available_indices']['search_status'] = f'❌ EXCEPTION: {str(e)}'
+        results['v3_snapshot']['status'] = f'❌ EXCEPTION: {str(e)}'
+        import traceback
+        results['v3_snapshot']['traceback'] = traceback.format_exc()
     
     # ========================================================================
-    # STEP 2: Test specific tickers we care about
+    # METHOD 2: v2 Aggregates - SPX (for historical RV calculation)
     # ========================================================================
-    target_tickers = ['I:SPX', 'I:VIX', 'I:VIX1D', 'I:VIX9D', 'I:VXST']
-    results['ticker_details'] = {}
-    
-    for ticker in target_tickers:
-        try:
-            print(f"  [SEARCH] Looking up {ticker}...")
-            # URL encode the ticker (: becomes %3A)
-            encoded_ticker = ticker.replace(':', '%3A')
-            lookup_url = f"https://api.massive.com/v3/reference/tickers?ticker={encoded_ticker}&market=indices&active=true&apiKey={POLYGON_KEY}"
-            
-            lookup_response = requests.get(lookup_url, timeout=10)
-            
-            ticker_result = {
-                'http_status': lookup_response.status_code
-            }
-            
-            if lookup_response.status_code == 200:
-                data = lookup_response.json()
-                
-                if 'results' in data and len(data['results']) > 0:
-                    ticker_result['status'] = '✅ FOUND'
-                    ticker_result['info'] = data['results'][0]
-                    ticker_result['name'] = data['results'][0].get('name')
-                    ticker_result['type'] = data['results'][0].get('type')
-                else:
-                    ticker_result['status'] = '❌ NOT FOUND in indices'
-            
-            elif lookup_response.status_code == 403:
-                ticker_result['status'] = '❌ FORBIDDEN (403)'
-            
-            else:
-                ticker_result['status'] = f'❌ HTTP {lookup_response.status_code}'
-            
-            results['ticker_details'][ticker] = ticker_result
-            time_module.sleep(0.3)
-        
-        except Exception as e:
-            results['ticker_details'][ticker] = {'status': f'❌ EXCEPTION: {str(e)}'}
-    
-    # ========================================================================
-    # STEP 3: Get actual quotes for working tickers
-    # ========================================================================
-    results['quotes'] = {}
-    
-    # Try different quote endpoints
-    quote_endpoints = [
-        ('v3_quotes', 'https://api.massive.com/v3/quotes/{ticker}?apiKey={key}'),
-        ('v3_snapshot', 'https://api.massive.com/v3/snapshot/indices/{ticker}?apiKey={key}'),
-        ('v2_last_trade', 'https://api.massive.com/v2/last/trade/{ticker}?apiKey={key}'),
-    ]
-    
-    for ticker in ['I:SPX', 'I:VIX', 'I:VIX1D']:
-        results['quotes'][ticker] = {}
-        
-        for endpoint_name, endpoint_template in quote_endpoints:
-            try:
-                url = endpoint_template.format(ticker=ticker, key=POLYGON_KEY)
-                print(f"  [QUOTE] {ticker} via {endpoint_name}...")
-                
-                response = requests.get(url, timeout=10)
-                
-                quote_result = {
-                    'http_status': response.status_code,
-                    'url': url.replace(POLYGON_KEY, 'API_KEY')
-                }
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    quote_result['response'] = data
-                    
-                    # Try to extract price from various formats
-                    price = None
-                    
-                    if 'results' in data:
-                        if isinstance(data['results'], list) and len(data['results']) > 0:
-                            price = data['results'][0].get('price') or data['results'][0].get('p')
-                        elif isinstance(data['results'], dict):
-                            price = data['results'].get('price') or data['results'].get('p')
-                    
-                    if price:
-                        quote_result['status'] = f'✅ SUCCESS - Price: {price}'
-                        quote_result['price'] = float(price)
-                    else:
-                        quote_result['status'] = '⚠️ Response received but no price found'
-                
-                elif response.status_code == 404:
-                    quote_result['status'] = '❌ NOT FOUND (404)'
-                
-                elif response.status_code == 403:
-                    quote_result['status'] = '❌ FORBIDDEN (403)'
-                    quote_result['response'] = response.json()
-                
-                else:
-                    quote_result['status'] = f'❌ HTTP {response.status_code}'
-                
-                results['quotes'][ticker][endpoint_name] = quote_result
-                time_module.sleep(0.3)
-            
-            except Exception as e:
-                results['quotes'][ticker][endpoint_name] = {'status': f'❌ EXCEPTION: {str(e)}'}
-    
-    # ========================================================================
-    # STEP 4: Test aggregates for SPX (historical data)
-    # ========================================================================
-    results['spx_aggregates'] = {}
+    results['v2_aggregates_spx'] = {}
     
     try:
         print("  [AGGREGATES] Fetching SPX historical data...")
+        
         end_date = datetime.now(ET_TZ)
         start_date = end_date - timedelta(days=30)
         
-        agg_url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&apiKey={POLYGON_KEY}"
-        agg_response = requests.get(agg_url, timeout=15)
+        # Official format: /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
+        url = f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=50&apiKey={POLYGON_KEY}"
         
-        results['spx_aggregates']['http_status'] = agg_response.status_code
+        response = requests.get(url, timeout=15)
         
-        if agg_response.status_code == 200:
-            data = agg_response.json()
+        results['v2_aggregates_spx']['http_status'] = response.status_code
+        
+        if response.status_code == 200:
+            data = response.json()
             
             if 'results' in data and len(data['results']) > 0:
-                results['spx_aggregates']['status'] = '✅ SUCCESS'
-                results['spx_aggregates']['days_returned'] = len(data['results'])
-                results['spx_aggregates']['latest_close'] = data['results'][0].get('c')
+                results['v2_aggregates_spx']['status'] = '✅ SUCCESS'
+                results['v2_aggregates_spx']['count'] = data.get('queryCount', len(data['results']))
+                results['v2_aggregates_spx']['ticker'] = data.get('ticker')
                 
+                # Get latest bar
+                latest = data['results'][0]
+                results['v2_aggregates_spx']['latest'] = {
+                    'close': latest.get('c'),
+                    'open': latest.get('o'),
+                    'high': latest.get('h'),
+                    'low': latest.get('l'),
+                    'timestamp': latest.get('t')
+                }
+                
+                # Get closes for RV calculation (last 10 days)
                 closes = [bar['c'] for bar in data['results'][:10]]
-                results['spx_aggregates']['sample_closes'] = closes
+                results['v2_aggregates_spx']['sample_closes'] = closes
+                results['v2_aggregates_spx']['days_for_rv'] = len(closes)
+            
             else:
-                results['spx_aggregates']['status'] = '❌ NO RESULTS'
+                results['v2_aggregates_spx']['status'] = '❌ NO RESULTS'
         
-        elif agg_response.status_code == 403:
-            results['spx_aggregates']['status'] = '❌ FORBIDDEN (403)'
-            results['spx_aggregates']['response'] = agg_response.json()
+        elif response.status_code == 403:
+            results['v2_aggregates_spx']['status'] = '❌ FORBIDDEN (403)'
         
         else:
-            results['spx_aggregates']['status'] = f'❌ HTTP {agg_response.status_code}'
+            results['v2_aggregates_spx']['status'] = f'❌ HTTP {response.status_code}'
     
     except Exception as e:
-        results['spx_aggregates']['status'] = f'❌ EXCEPTION: {str(e)}'
+        results['v2_aggregates_spx']['status'] = f'❌ EXCEPTION: {str(e)}'
     
     # ========================================================================
-    # SUMMARY
+    # METHOD 3: v2 Aggregates - VIX1D (if needed for historical)
     # ========================================================================
-    indices_available = results['available_indices'].get('search_status') == '✅ SUCCESS'
-    spx_found = 'I:SPX' in results.get('ticker_details', {}) and '✅' in results['ticker_details'].get('I:SPX', {}).get('status', '')
-    vix_variants = results['available_indices'].get('vix_variants', [])
+    results['v2_aggregates_vix1d'] = {}
     
-    # Check if any quote endpoint worked
-    working_quotes = {}
-    for ticker, endpoints in results.get('quotes', {}).items():
-        for endpoint_name, endpoint_data in endpoints.items():
-            if '✅' in endpoint_data.get('status', ''):
-                if ticker not in working_quotes:
-                    working_quotes[ticker] = []
-                working_quotes[ticker].append(endpoint_name)
+    try:
+        print("  [AGGREGATES] Fetching VIX1D historical data...")
+        
+        end_date = datetime.now(ET_TZ)
+        start_date = end_date - timedelta(days=10)
+        
+        url = f"https://api.massive.com/v2/aggs/ticker/I:VIX1D/range/1/day/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=desc&limit=10&apiKey={POLYGON_KEY}"
+        
+        response = requests.get(url, timeout=15)
+        
+        results['v2_aggregates_vix1d']['http_status'] = response.status_code
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if 'results' in data and len(data['results']) > 0:
+                results['v2_aggregates_vix1d']['status'] = '✅ SUCCESS'
+                results['v2_aggregates_vix1d']['latest_close'] = data['results'][0].get('c')
+                results['v2_aggregates_vix1d']['days_returned'] = len(data['results'])
+            else:
+                results['v2_aggregates_vix1d']['status'] = '❌ NO RESULTS'
+        
+        else:
+            results['v2_aggregates_vix1d']['status'] = f'❌ HTTP {response.status_code}'
+    
+    except Exception as e:
+        results['v2_aggregates_vix1d']['status'] = f'❌ EXCEPTION: {str(e)}'
+    
+    # ========================================================================
+    # SUMMARY & RECOMMENDATION
+    # ========================================================================
+    
+    # Check if snapshot worked
+    snapshot_worked = results['v3_snapshot'].get('status') == '✅ SUCCESS'
+    spx_in_snapshot = 'SPX' in results['v3_snapshot'] and results['v3_snapshot']['SPX'].get('status') == '✅ FOUND'
+    vix1d_in_snapshot = 'VIX1D' in results['v3_snapshot'] and results['v3_snapshot']['VIX1D'].get('status') == '✅ FOUND'
+    
+    # Check if aggregates worked
+    spx_agg_worked = results['v2_aggregates_spx'].get('status') == '✅ SUCCESS'
+    vix1d_agg_worked = results['v2_aggregates_vix1d'].get('status') == '✅ SUCCESS'
     
     results['summary'] = {
-        'indices_search_working': indices_available,
-        'spx_found': spx_found,
-        'vix_variants_available': vix_variants,
-        'working_quote_endpoints': working_quotes,
-        'aggregates_working': '✅' in results.get('spx_aggregates', {}).get('status', '')
+        'snapshot_api_working': snapshot_worked,
+        'spx_snapshot_available': spx_in_snapshot,
+        'vix1d_snapshot_available': vix1d_in_snapshot,
+        'spx_aggregates_working': spx_agg_worked,
+        'vix1d_aggregates_working': vix1d_agg_worked
     }
     
-    # Final recommendation
-    if indices_available and spx_found and len(working_quotes) > 0:
-        results['recommendation'] = f'✅ POLYGON/MASSIVE FULLY WORKING - {len(vix_variants)} VIX variants available!'
+    # Determine if ready for bot
+    if spx_in_snapshot and vix1d_in_snapshot and spx_agg_worked:
+        results['recommendation'] = '✅ POLYGON FULLY READY!'
         results['status'] = 'READY'
-        
-        if 'I:VIX1D' in vix_variants:
-            results['note'] = 'I:VIX1D available - perfect for overnight strategy!'
-        elif 'I:VIX9D' in vix_variants:
-            results['note'] = 'I:VIX9D available (9-day vol, closest to overnight)'
-        elif 'I:VIX' in vix_variants:
-            results['note'] = 'Standard I:VIX available (30-day vol)'
+        results['data_available'] = {
+            'spx_current': f"Via snapshot (timeframe: {results['v3_snapshot']['SPX'].get('timeframe')})",
+            'vix1d_current': f"Via snapshot (timeframe: {results['v3_snapshot']['VIX1D'].get('timeframe')})",
+            'spx_historical': 'Via aggregates (for RV calculation)'
+        }
+        results['next_step'] = 'Ready to build production script with Polygon!'
     
-    elif indices_available and not spx_found:
-        results['recommendation'] = '⚠️ Indices accessible but SPX not found - Check ticker format'
-        results['status'] = 'SPX_MISSING'
-    
-    elif not indices_available:
-        results['recommendation'] = '❌ Indices not accessible - Upgrade may not be active yet (wait 10 min) OR need different plan'
-        results['status'] = 'NO_INDICES_ACCESS'
+    elif spx_agg_worked and not spx_in_snapshot:
+        results['recommendation'] = '⚠️ Historical works but snapshot failed - May need to wait for subscription to activate'
+        results['status'] = 'PARTIAL'
+        results['next_step'] = 'Wait 30 minutes or contact Polygon support'
     
     else:
-        results['recommendation'] = '⚠️ Partial access - Check details above'
-        results['status'] = 'PARTIAL'
+        results['recommendation'] = '❌ Polygon not working - Check subscription or contact support'
+        results['status'] = 'FAILED'
+        results['next_step'] = 'Contact support@polygon.io'
     
     return jsonify(results), 200
 

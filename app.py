@@ -29,7 +29,7 @@ ET_TZ = pytz.timezone('US/Eastern')
 
 # Trading windows - PRODUCTION: 2:30-3:30 PM ET
 TRADING_WINDOW_START = dt_time(hour=14, minute=30)
-TRADING_WINDOW_END = dt_time(hour=23, minute=30)
+TRADING_WINDOW_END = dt_time(hour=15, minute=30)
 
 # Load config at startup
 CONFIG = get_config()

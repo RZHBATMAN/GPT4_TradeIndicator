@@ -18,7 +18,8 @@ import requests
 # Import modular components
 from config.loader import get_config
 from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_spx_aggregates
-from data.news_fetcher import fetch_news_multi_source
+from data.news_fetcher import fetch_news_raw
+from processing.pipeline import process_news_pipeline
 from signal_engine import run_signal_analysis
 from webhooks import send_webhook
 
@@ -311,8 +312,12 @@ def option_alpha_trigger():
         if not vix1d_data:
             return jsonify({"status": "error", "message": "VIX1D data failed after 3 retries (Polygon)"}), 500
         
-        # Fetch news
-        news_data = fetch_news_multi_source()
+        # Fetch and process news
+        print(f"[{timestamp}] Fetching news from RSS sources...")
+        raw_articles = fetch_news_raw()
+        
+        print(f"[{timestamp}] Processing news (deduplication + filtering)...")
+        news_data = process_news_pipeline(raw_articles)
         
         print(f"[{timestamp}] Running indicators...")
         

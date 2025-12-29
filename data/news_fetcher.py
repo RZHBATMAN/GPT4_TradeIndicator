@@ -1,11 +1,9 @@
-"""News fetching from multiple RSS sources"""
+"""News fetching from multiple RSS sources - RAW DATA ONLY"""
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from dateutil import parser as date_parser
 import pytz
-from processing.news_dedup import deduplicate_articles_smart
-from processing.news_filter import filter_news_lenient
 
 ET_TZ = pytz.timezone('US/Eastern')
 
@@ -121,8 +119,8 @@ def fetch_google_news_rss():
         return []
 
 
-def fetch_news_multi_source():
-    """Triple-layer news processing"""
+def fetch_news_raw():
+    """Fetch raw news from all sources - NO PROCESSING"""
     try:
         all_articles = []
         
@@ -132,96 +130,10 @@ def fetch_news_multi_source():
         all_articles.extend(yahoo_articles)
         all_articles.extend(google_articles)
         
-        raw_count = len(all_articles)
-        
-        if not all_articles:
-            return {
-                'count': 0,
-                'summary': 'No news available.',
-                'articles': [],
-                'filter_stats': {
-                    'raw_articles': 0,
-                    'duplicates_removed': 0,
-                    'unique_articles': 0,
-                    'junk_filtered': 0,
-                    'sent_to_gpt': 0
-                }
-            }
-        
-        # LAYER 1: Deduplication
-        unique_articles = deduplicate_articles_smart(all_articles)
-        duplicates_removed = raw_count - len(unique_articles)
-        
-        # LAYER 2: Keyword filter
-        filtered_articles, filter_stats = filter_news_lenient(unique_articles, verbose=False)
-        
-        if not filtered_articles:
-            return {
-                'count': 0,
-                'summary': 'No actionable news after filtering.',
-                'articles': [],
-                'filter_stats': {
-                    'raw_articles': raw_count,
-                    'duplicates_removed': duplicates_removed,
-                    'unique_articles': len(unique_articles),
-                    'junk_filtered': filter_stats['filtered_junk'],
-                    'sent_to_gpt': 0
-                }
-            }
-        
-        filtered_articles.sort(key=lambda x: x['published_time'], reverse=True)
-        
-        # Format for GPT
-        news_summary = ""
-        for article in filtered_articles[:30]:
-            time_str = article['published_time'].strftime("%I:%M %p")
-            hours_ago = article['hours_ago']
-            
-            if hours_ago < 1:
-                recency = "⚠️ VERY RECENT"
-            elif hours_ago < 3:
-                recency = "🔸 RECENT"
-            elif hours_ago < 6:
-                recency = "• Somewhat recent"
-            else:
-                recency = "• Earlier today"
-            
-            priority = article.get('priority', 'NORMAL')
-            priority_marker = "🔥" if priority == 'HIGH' else ""
-            
-            news_summary += f"[{time_str}] {recency} {priority_marker} ({article['source']})\n"
-            news_summary += f"   {article['title']}\n"
-            if article['description']:
-                desc = article['description'][:150]
-                news_summary += f"   {desc}...\n"
-            news_summary += "\n"
-        
-        return {
-            'count': len(filtered_articles),
-            'summary': news_summary.strip(),
-            'articles': filtered_articles[:30],
-            'filter_stats': {
-                'raw_articles': raw_count,
-                'duplicates_removed': duplicates_removed,
-                'unique_articles': len(unique_articles),
-                'junk_filtered': filter_stats['filtered_junk'],
-                'sent_to_gpt': filter_stats['kept']
-            }
-        }
+        return all_articles
         
     except Exception as e:
-        print(f"CRITICAL ERROR in fetch_news_multi_source: {e}")
+        print(f"CRITICAL ERROR in fetch_news_raw: {e}")
         import traceback
         traceback.print_exc()
-        return {
-            'count': 0,
-            'summary': f'News fetch failed: {str(e)}',
-            'articles': [],
-            'filter_stats': {
-                'raw_articles': 0,
-                'duplicates_removed': 0,
-                'unique_articles': 0,
-                'junk_filtered': 0,
-                'sent_to_gpt': 0
-            }
-        }
+        return []

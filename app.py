@@ -28,7 +28,7 @@ app = Flask(__name__)
 # Configuration
 ET_TZ = pytz.timezone('US/Eastern')
 
-# Trading windows - PRODUCTION: 2:30-3:30 PM ET
+# Trading windows - PRODUCTION: Mon-Fri, 2:30-3:30 PM ET
 TRADING_WINDOW_START = dt_time(hour=14, minute=30)
 TRADING_WINDOW_END = dt_time(hour=15, minute=30)
 
@@ -41,9 +41,15 @@ POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 # ============================================================================
 
 def is_within_trading_window(now=None):
-    """Check if within 2:30-3:30 PM ET trading window"""
+    """Check if within 2:30-3:30 PM ET trading window on weekdays (Mon-Fri)"""
     if now is None:
         now = datetime.now(ET_TZ)
+    
+    # Check if it's a weekday (Monday=0, Friday=4, Saturday=5, Sunday=6)
+    if now.weekday() >= 5:  # Saturday or Sunday
+        return False
+    
+    # Check time window
     current_time = now.time()
     return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
 
@@ -223,7 +229,7 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">Trading Window:</span>
-                    <span class="info-value">2:30 PM - 3:30 PM ET</span>
+                    <span class="info-value">Mon-Fri, 2:30 PM - 3:30 PM ET</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">Environment:</span>
@@ -275,7 +281,7 @@ def health_check():
         "status": "healthy",
         "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
         "environment": "production",
-        "trading_window": "2:30-3:30 PM ET",
+        "trading_window": "Mon-Fri, 2:30-3:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
         "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
         "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
@@ -295,7 +301,7 @@ def option_alpha_trigger():
     if not is_within_trading_window(now):
         return jsonify({
             "status": "outside_window",
-            "message": "Outside trading window (2:30-3:30 PM ET)",
+            "message": "Outside trading window (Mon-Fri, 2:30-3:30 PM ET)",
             "timestamp": timestamp
         }), 200
     
@@ -524,7 +530,7 @@ if __name__ == "__main__":
     print("Ren's SPX Vol Signal - Production (Polygon/Massive)")
     print("=" * 80)
     print(f"Port: {PORT}")
-    print(f"Trading Window: 2:30-3:30 PM ET")
+    print(f"Trading Window: Mon-Fri, 2:30-3:30 PM ET")
     print(f"Market Data: Polygon/Massive Indices Starter ($49/mo)")
     print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")

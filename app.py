@@ -28,7 +28,7 @@ app = Flask(__name__)
 # Configuration
 ET_TZ = pytz.timezone('US/Eastern')
 
-# Trading windows - PRODUCTION: Mon-Fri, 2:30-3:30 PM ET
+# Trading windows - PRODUCTION: Mon-Fri, 1:30-2:30 PM ET
 TRADING_WINDOW_START = dt_time(hour=13, minute=30)
 TRADING_WINDOW_END = dt_time(hour=14, minute=30)
 
@@ -41,7 +41,7 @@ POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 # ============================================================================
 
 def is_within_trading_window(now=None):
-    """Check if within 2:30-3:30 PM ET trading window on weekdays (Mon-Fri)"""
+    """Check if within 1:30-2:30 PM ET trading window on weekdays (Mon-Fri)"""
     if now is None:
         now = datetime.now(ET_TZ)
     
@@ -196,13 +196,13 @@ def homepage():
                 <div class="edge-item">
                     <div class="edge-label">📈 Core Edge:</div>
                     <div class="edge-desc">
-                        Sell SPX iron condors (2:30-3:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility 
+                        Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility 
                         and overnight news risk is manageable. Capture theta decay + vol premium during the ~16-hour overnight period.
                     </div>
                 </div>
                 
                 <div class="edge-item">
-                    <div class="edge-label">🔍 Signal Components (3 Indicators):</div>
+                    <div class="edge-label">🔍 Trading Factors (3 Factors):</div>
                     <div class="edge-desc">
                         <strong>1. IV/RV Ratio (30%):</strong> Real VIX1D (1-day forward IV) vs 10-day realized vol.<br>
                         <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
@@ -229,7 +229,7 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">Trading Window:</span>
-                    <span class="info-value">Mon-Fri, 2:30 PM - 3:30 PM ET</span>
+                    <span class="info-value">Mon-Fri, 1:30 PM - 2:30 PM ET</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">Environment:</span>
@@ -281,7 +281,7 @@ def health_check():
         "status": "healthy",
         "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
         "environment": "production",
-        "trading_window": "Mon-Fri, 2:30-3:30 PM ET",
+        "trading_window": "Mon-Fri, 1:30-2:30 PM ET",
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
         "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
         "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
@@ -301,7 +301,7 @@ def option_alpha_trigger():
     if not is_within_trading_window(now):
         return jsonify({
             "status": "outside_window",
-            "message": "Outside trading window (Mon-Fri, 2:30-3:30 PM ET)",
+            "message": "Outside trading window (Mon-Fri, 1:30-2:30 PM ET)",
             "timestamp": timestamp
         }), 200
     
@@ -325,23 +325,76 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Processing news (deduplication + filtering)...")
         news_data = process_news_pipeline(raw_articles)
         
-        print(f"[{timestamp}] Running indicators...")
+        print(f"[{timestamp}] Analyzing factors...")
         
         # Use the signal engine to run all analysis
         analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data)
         
-        indicators = analysis_result['indicators']
+        factors = analysis_result['indicators']  # Internal: signal_engine uses 'indicators' key
         composite = analysis_result['composite']
         signal = analysis_result['signal']
         
+        iv_rv = factors['iv_rv']
+        trend = factors['trend']
+        gpt = factors['gpt']
+        
+        # Detailed logging for each factor
+        print(f"\n[{timestamp}] ========== FACTOR ANALYSIS ==========")
+        
+        # Factor 1: IV/RV Ratio (30% weight)
+        print(f"[{timestamp}] FACTOR 1: IV/RV Ratio (Weight: 30%)")
+        print(f"[{timestamp}]   - VIX1D (Implied Vol): {iv_rv['implied_vol']:.2f}%")
+        print(f"[{timestamp}]   - Realized Vol (10-day): {iv_rv['realized_vol']:.2f}%")
+        print(f"[{timestamp}]   - IV/RV Ratio: {iv_rv['iv_rv_ratio']:.3f}")
+        if 'rv_change' in iv_rv:
+            print(f"[{timestamp}]   - RV Change: {iv_rv['rv_change']*100:+.2f}%")
+        print(f"[{timestamp}]   - Factor Score: {iv_rv['score']:.1f}/10")
+        print(f"[{timestamp}]   - Weighted Contribution: {iv_rv['score'] * 0.30:.2f}")
+        
+        # Factor 2: Market Trend (20% weight)
+        print(f"[{timestamp}] FACTOR 2: Market Trend (Weight: 20%)")
+        print(f"[{timestamp}]   - SPX Current: {spx_data['current']:.2f}")
+        print(f"[{timestamp}]   - SPX High Today: {spx_data['high_today']:.2f}")
+        print(f"[{timestamp}]   - SPX Low Today: {spx_data['low_today']:.2f}")
+        print(f"[{timestamp}]   - 5-Day Change: {trend['change_5d']*100:+.2f}%")
+        print(f"[{timestamp}]   - Intraday Range: {trend['intraday_range']*100:.2f}%")
+        print(f"[{timestamp}]   - Factor Score: {trend['score']:.1f}/10")
+        print(f"[{timestamp}]   - Weighted Contribution: {trend['score'] * 0.20:.2f}")
+        
+        # Factor 3: GPT News Analysis (50% weight)
+        print(f"[{timestamp}] FACTOR 3: GPT News Analysis (Weight: 50%)")
+        print(f"[{timestamp}]   - News Pipeline Stats:")
+        filter_stats = news_data.get('filter_stats', {})
+        print(f"[{timestamp}]     * Raw Articles Fetched: {filter_stats.get('raw_articles', 0)}")
+        print(f"[{timestamp}]     * Duplicates Removed: {filter_stats.get('duplicates_removed', 0)}")
+        print(f"[{timestamp}]     * Unique Articles: {filter_stats.get('unique_articles', 0)}")
+        print(f"[{timestamp}]     * Junk Filtered: {filter_stats.get('junk_filtered', 0)}")
+        print(f"[{timestamp}]     * Sent to GPT: {filter_stats.get('sent_to_gpt', 0)}")
+        print(f"[{timestamp}]   - GPT Analysis:")
+        print(f"[{timestamp}]     * Category: {gpt.get('category', 'UNKNOWN')}")
+        print(f"[{timestamp}]     * Key Risk: {gpt.get('key_risk', 'None')}")
+        print(f"[{timestamp}]     * Direction Risk: {gpt.get('direction_risk', 'UNKNOWN')}")
+        if 'duplicates_found' in gpt:
+            print(f"[{timestamp}]     * Duplicates Found by GPT: {gpt['duplicates_found']}")
+        print(f"[{timestamp}]   - Factor Score: {gpt['score']:.1f}/10")
+        print(f"[{timestamp}]   - Weighted Contribution: {gpt['score'] * 0.50:.2f}")
+        print(f"[{timestamp}]   - GPT Reasoning: {gpt.get('reasoning', 'N/A')[:200]}...")
+        
+        # Composite Score
+        print(f"\n[{timestamp}] ========== COMPOSITE SCORE ==========")
+        print(f"[{timestamp}] Composite Score: {composite['score']:.1f}/10")
+        print(f"[{timestamp}] Category: {composite['category']}")
+        print(f"[{timestamp}] Breakdown: ({iv_rv['score']:.1f} × 0.30) + ({trend['score']:.1f} × 0.20) + ({gpt['score']:.1f} × 0.50) = {composite['score']:.1f}")
+        
+        # Final Signal
+        print(f"\n[{timestamp}] ========== FINAL SIGNAL ==========")
+        print(f"[{timestamp}] Signal: {signal['signal']}")
+        print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
+        print(f"[{timestamp}] Reason: {signal['reason']}")
+        print(f"[{timestamp}] ======================================\n")
+        
         # Send webhook
         webhook = send_webhook(signal)
-        
-        print(f"[{timestamp}] Decision: {signal['signal']} (Score: {composite['score']:.1f})")
-        
-        iv_rv = indicators['iv_rv']
-        trend = indicators['trend']
-        gpt = indicators['gpt']
         
         # Format news headlines
         news_headlines = []
@@ -390,7 +443,7 @@ def option_alpha_trigger():
                 "timeframe": spx_data.get('timeframe', 'DELAYED')
             },
             
-            "indicator_1_iv_rv": {
+            "factor_1_iv_rv": {
                 "weight": "30%",
                 "score": iv_rv['score'],
                 "iv_rv_ratio": iv_rv['iv_rv_ratio'],
@@ -401,14 +454,14 @@ def option_alpha_trigger():
                 "source": "Polygon VIX1D (real data)"
             },
             
-            "indicator_2_trend": {
+            "factor_2_trend": {
                 "weight": "20%",
                 "score": trend['score'],
                 "trend_change_5d": f"{trend['change_5d'] * 100:+.2f}%",
                 "intraday_range": f"{trend['intraday_range'] * 100:.2f}%"
             },
             
-            "indicator_3_news_gpt": {
+            "factor_3_news_gpt": {
                 "weight": "50%",
                 
                 "triple_layer_pipeline": {
@@ -530,7 +583,7 @@ if __name__ == "__main__":
     print("Ren's SPX Vol Signal - Production (Polygon/Massive)")
     print("=" * 80)
     print(f"Port: {PORT}")
-    print(f"Trading Window: Mon-Fri, 2:30-3:30 PM ET")
+    print(f"Trading Window: Mon-Fri, 1:30-2:30 PM ET")
     print(f"Market Data: Polygon/Massive Indices Starter ($49/mo)")
     print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")

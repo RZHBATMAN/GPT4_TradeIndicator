@@ -1,0 +1,15 @@
+# Local config (secrets) — use .config.example as template
+.config
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+venv/
+.venv/
+env/
+
+# Env files if you ever add them
+.env
+.env.local

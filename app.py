@@ -42,6 +42,8 @@ IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
 POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
+# MiniMax model in use (default MiniMax-M2.1 if not set)
+MINIMAX_MODEL_DISPLAY = (CONFIG.get("MINIMAX_MODEL") or "").strip() or "MiniMax-M2.1"
 
 # ============================================================================
 # TRADING WINDOW CHECK
@@ -280,7 +282,7 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">AI Analysis:</span>
-                    <span class="info-value">GPT-4 Turbo (OpenAI)</span>
+                    <span class="info-value">MiniMax ({MINIMAX_MODEL_DISPLAY})</span>
                 </div>
             </div>
             
@@ -632,6 +634,7 @@ if __name__ == "__main__":
     print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")
     print(f"VIX1D: Real I:VIX1D (15-min delayed, 1-day forward IV)")
+    print(f"AI Analysis: MiniMax ({MINIMAX_MODEL_DISPLAY})")
     print("=" * 80)
 
     # Start POKE thread only in production so local = one click = one run

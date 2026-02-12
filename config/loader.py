@@ -22,6 +22,13 @@ REQUIRED_KEYS = [
     "NO_TRADE_URL",
 ]
 
+# Optional: Google Sheets logging (if set, signal history is appended to sheet)
+# Use GOOGLE_CREDENTIALS_JSON for both local and Railway (minified JSON string).
+OPTIONAL_KEYS = [
+    "GOOGLE_SHEET_ID",
+    "GOOGLE_CREDENTIALS_JSON",
+]
+
 
 def _project_root() -> Path:
     """Project root: parent of the config package directory."""
@@ -33,7 +40,8 @@ def _load_from_file(config_path: Path) -> Optional[Dict[str, str]]:
     if not config_path.is_file():
         return None
     try:
-        parser = ConfigParser()
+        # interpolation=None so values can contain % (e.g. %40 in JSON emails) without being interpreted
+        parser = ConfigParser(interpolation=None)
         parser.read(config_path, encoding="utf-8")
         out: Dict[str, str] = {}
         if parser.has_section("API_KEYS"):
@@ -44,6 +52,9 @@ def _load_from_file(config_path: Path) -> Optional[Dict[str, str]]:
             out["TRADE_NORMAL_URL"] = parser.get("WEBHOOKS", "TRADE_NORMAL_URL", fallback="").strip() or None
             out["TRADE_CONSERVATIVE_URL"] = parser.get("WEBHOOKS", "TRADE_CONSERVATIVE_URL", fallback="").strip() or None
             out["NO_TRADE_URL"] = parser.get("WEBHOOKS", "NO_TRADE_URL", fallback="").strip() or None
+        if parser.has_section("GOOGLE_SHEETS"):
+            out["GOOGLE_SHEET_ID"] = parser.get("GOOGLE_SHEETS", "GOOGLE_SHEET_ID", fallback="").strip() or None
+            out["GOOGLE_CREDENTIALS_JSON"] = parser.get("GOOGLE_SHEETS", "GOOGLE_CREDENTIALS_JSON", fallback="").strip() or None
         return out
     except Exception as e:
         logger.warning("Could not load .config file %s: %s", config_path, e)
@@ -64,11 +75,17 @@ def load_config() -> Dict[str, str]:
     if file_config:
         for k in REQUIRED_KEYS:
             result[k] = (file_config.get(k) or os.environ.get(k)) or ""
+        for k in OPTIONAL_KEYS:
+            result[k] = (file_config.get(k) or os.environ.get(k)) or ""
+        result["_FROM_FILE"] = "1"  # Truthy: app can treat as "local" (e.g. 24hr trading window)
         logger.info("Config loaded from .config with env fallback: %s", config_path)
     else:
         # 2) No .config or failed: use environment only (e.g. Railway)
         for k in REQUIRED_KEYS:
             result[k] = os.environ.get(k) or ""
+        for k in OPTIONAL_KEYS:
+            result[k] = os.environ.get(k) or ""
+        result["_FROM_FILE"] = ""  # Falsy: production/deployed
         logger.info("Config loaded from environment variables (no .config)")
 
     missing = [k for k in REQUIRED_KEYS if not (result.get(k) or "").strip()]

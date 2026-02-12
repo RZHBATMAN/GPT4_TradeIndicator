@@ -25,7 +25,8 @@ def analyze_gpt_news(news_data):
         }
     
     config = get_config()
-    openai_api_key = config.get('OPENAI_API_KEY')
+    minimax_api_key = config.get('MINIMAX_API_KEY')
+    minimax_model = (config.get('MINIMAX_MODEL') or '').strip() or 'MiniMax-M2.1'
     
     now = datetime.now(ET_TZ)
     current_time_str = now.strftime("%I:%M %p ET")
@@ -228,30 +229,30 @@ Respond in JSON only (no markdown):
 }}
 """
     
-    print(f"\n[LAYER 3] GPT ANALYSIS: Calling GPT-4 Turbo with significance-time decay model...")
+    print(f"\n[LAYER 3] GPT ANALYSIS: Calling MiniMax ({minimax_model}) with significance-time decay model...")
     
     try:
         headers = {
-            "Authorization": f"Bearer {openai_api_key}",
+            "Authorization": f"Bearer {minimax_api_key}",
             "Content-Type": "application/json"
         }
         
         data = {
-            "model": "gpt-4-turbo",
+            "model": minimax_model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1000,  # Increased from 800 to accommodate more detailed reasoning
+            "max_tokens": 1000,
             "temperature": 0.3
         }
         
         response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
+            "https://api.minimax.io/v1/chat/completions",
             headers=headers,
             json=data,
-            timeout=30
+            timeout=60
         )
         
         if response.status_code != 200:
-            print(f"  ❌ OpenAI API error: {response.status_code}")
+            print(f"  ❌ MiniMax API error: {response.status_code}")
             return {
                 'score': 5,
                 'raw_score': 5,
@@ -271,19 +272,13 @@ Respond in JSON only (no markdown):
         output_tokens = usage.get('completion_tokens', 0)
         total_tokens = usage.get('total_tokens', 0)
         
-        # Calculate cost (GPT-4 Turbo pricing)
-        input_cost = (input_tokens / 1000) * 0.01  # $0.01 per 1K input tokens
-        output_cost = (output_tokens / 1000) * 0.03  # $0.03 per 1K output tokens
-        total_cost = input_cost + output_cost
+        # MiniMax pricing varies by model; log usage only
+        total_cost = 0.0
         
         print(f"  📊 TOKEN USAGE:")
         print(f"     Input tokens:  {input_tokens:,}")
         print(f"     Output tokens: {output_tokens:,}")
         print(f"     Total tokens:  {total_tokens:,}")
-        print(f"  💰 COST:")
-        print(f"     Input cost:  ${input_cost:.4f}")
-        print(f"     Output cost: ${output_cost:.4f}")
-        print(f"     Total cost:  ${total_cost:.4f}")
         
         response_text = result['choices'][0]['message']['content'].strip()
         
@@ -308,7 +303,7 @@ Respond in JSON only (no markdown):
         
         calibrated = max(1, min(10, round(calibrated)))
         
-        print(f"  ✅ GPT Risk Score: {raw_score} (calibrated: {calibrated})")
+        print(f"  ✅ MiniMax Risk Score: {raw_score} (calibrated: {calibrated})")
         print(f"  ✅ Category: {gpt_analysis.get('risk_category', 'MODERATE')}")
         
         return {
@@ -328,14 +323,14 @@ Respond in JSON only (no markdown):
         }
         
     except Exception as e:
-        print(f"  ❌ GPT error: {e}")
+        print(f"  ❌ MiniMax error: {e}")
         import traceback
         traceback.print_exc()
         return {
             'score': 5,
             'raw_score': 5,
             'category': 'MODERATE',
-            'reasoning': f'GPT error: {str(e)}',
+            'reasoning': f'MiniMax error: {str(e)}',
             'direction_risk': 'UNKNOWN',
             'key_risk': 'Error',
             'duplicates_found': 'Error',

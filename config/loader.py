@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Keys required for the app (same names as env vars)
 REQUIRED_KEYS = [
-    "OPENAI_API_KEY",
+    "MINIMAX_API_KEY",
     "POLYGON_API_KEY",
     "TRADE_AGGRESSIVE_URL",
     "TRADE_NORMAL_URL",
@@ -22,9 +22,9 @@ REQUIRED_KEYS = [
     "NO_TRADE_URL",
 ]
 
-# Optional: Google Sheets logging (if set, signal history is appended to sheet)
-# Use GOOGLE_CREDENTIALS_JSON for both local and Railway (minified JSON string).
+# Optional
 OPTIONAL_KEYS = [
+    "MINIMAX_MODEL",  # e.g. MiniMax-M2.1, MiniMax-M2.1-lightning, MiniMax-M2; default MiniMax-M2.1
     "GOOGLE_SHEET_ID",
     "GOOGLE_CREDENTIALS_JSON",
 ]
@@ -45,8 +45,9 @@ def _load_from_file(config_path: Path) -> Optional[Dict[str, str]]:
         parser.read(config_path, encoding="utf-8")
         out: Dict[str, str] = {}
         if parser.has_section("API_KEYS"):
-            out["OPENAI_API_KEY"] = parser.get("API_KEYS", "OPENAI_API_KEY", fallback="").strip() or None
+            out["MINIMAX_API_KEY"] = parser.get("API_KEYS", "MINIMAX_API_KEY", fallback="").strip() or None
             out["POLYGON_API_KEY"] = parser.get("API_KEYS", "POLYGON_API_KEY", fallback="").strip() or None
+            out["MINIMAX_MODEL"] = parser.get("API_KEYS", "MINIMAX_MODEL", fallback="").strip() or None
         if parser.has_section("WEBHOOKS"):
             out["TRADE_AGGRESSIVE_URL"] = parser.get("WEBHOOKS", "TRADE_AGGRESSIVE_URL", fallback="").strip() or None
             out["TRADE_NORMAL_URL"] = parser.get("WEBHOOKS", "TRADE_NORMAL_URL", fallback="").strip() or None

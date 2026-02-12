@@ -22,6 +22,7 @@ from data.news_fetcher import fetch_news_raw
 from processing.pipeline import process_news_pipeline
 from signal_engine import run_signal_analysis
 from webhooks import send_webhook
+from sheets_logger import log_signal as log_signal_to_sheets
 
 app = Flask(__name__)
 
@@ -36,20 +37,30 @@ TRADING_WINDOW_END = dt_time(hour=14, minute=30)
 CONFIG = get_config()
 POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 
+# Derived: True when config was loaded from .config (local), False when env-only (e.g. Railway)
+IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
+TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
+ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
+POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
+
 # ============================================================================
 # TRADING WINDOW CHECK
 # ============================================================================
 
 def is_within_trading_window(now=None):
-    """Check if within 1:30-2:30 PM ET trading window on weekdays (Mon-Fri)"""
+    """Check if within 1:30-2:30 PM ET trading window on weekdays (Mon-Fri).
+    When config is loaded from .config (local), window is 24hr so you can test any time.
+    """
     if now is None:
         now = datetime.now(ET_TZ)
-    
-    # Check if it's a weekday (Monday=0, Friday=4, Saturday=5, Sunday=6)
+
+    # Local: config from .config → 24hr window for testing
+    if CONFIG.get("_FROM_FILE"):
+        return True
+
+    # Production: enforce Mon–Fri 1:30–2:30 PM ET
     if now.weekday() >= 5:  # Saturday or Sunday
         return False
-    
-    # Check time window
     current_time = now.time()
     return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
 
@@ -62,7 +73,9 @@ def homepage():
     """Homepage - Concise, Professional, Holistic"""
     now = datetime.now(ET_TZ)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-    
+    status_class = "status status-local" if IS_LOCAL else "status status-production"
+    status_text = "LOCAL (TEST) · 24hr trading window" if IS_LOCAL else "PRODUCTION · Mon–Fri 1:30–2:30 PM ET"
+
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -102,9 +115,15 @@ def homepage():
                 padding: 10px 20px;
                 border-radius: 25px;
                 font-weight: bold;
-                background: #10b981;
                 color: white;
                 margin-top: 15px;
+            }}
+            .status-production {{
+                background: #10b981;
+            }}
+            .status-local {{
+                background: #d97706;
+                border: 2px solid #b45309;
             }}
             .section {{
                 margin: 25px 0;
@@ -187,7 +206,7 @@ def homepage():
             <div class="header">
                 <h1>📊 Ren's SPX Vol Signal</h1>
                 <div class="subtitle">Automated SPX Overnight Iron Condor Decision System</div>
-                <div class="status">PRODUCTION - RAILWAY</div>
+                <div class="{status_class}">{status_text}</div>
             </div>
             
             <div class="strategy-box">
@@ -229,11 +248,15 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">Trading Window:</span>
-                    <span class="info-value">Mon-Fri, 1:30 PM - 2:30 PM ET</span>
+                    <span class="info-value">{TRADING_WINDOW_LABEL}</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">Environment:</span>
-                    <span class="info-value">Railway Production</span>
+                    <span class="info-value">{ENVIRONMENT_LABEL}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Scheduler (POKE):</span>
+                    <span class="info-value">{POKE_LABEL}</span>
                 </div>
             </div>
             
@@ -280,8 +303,8 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
-        "environment": "production",
-        "trading_window": "Mon-Fri, 1:30-2:30 PM ET",
+        "environment": "local" if IS_LOCAL else "production",
+        "trading_window": TRADING_WINDOW_LABEL,
         "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
         "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
         "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
@@ -301,8 +324,9 @@ def option_alpha_trigger():
     if not is_within_trading_window(now):
         return jsonify({
             "status": "outside_window",
-            "message": "Outside trading window (Mon-Fri, 1:30-2:30 PM ET)",
-            "timestamp": timestamp
+            "message": "Outside trading window (" + ("24hr on local" if IS_LOCAL else "Mon-Fri, 1:30-2:30 PM ET") + ")",
+            "timestamp": timestamp,
+            "environment": "local" if IS_LOCAL else "production",
         }), 200
     
     try:
@@ -395,7 +419,21 @@ def option_alpha_trigger():
         
         # Send webhook
         webhook = send_webhook(signal)
-        
+
+        # Log to Google Sheet for history/backtesting (optional; no-op if not configured)
+        log_signal_to_sheets(
+            timestamp=timestamp,
+            signal=signal,
+            composite=composite,
+            iv_rv=iv_rv,
+            trend=trend,
+            gpt=gpt,
+            spx_current=spx_data["current"],
+            vix1d_current=vix1d_data["current"],
+            filter_stats=news_data.get("filter_stats", {}),
+            webhook_success=webhook.get("success", False),
+        )
+
         # Format news headlines
         news_headlines = []
         if news_data.get('articles'):
@@ -427,7 +465,7 @@ def option_alpha_trigger():
         return jsonify({
             "status": "success",
             "timestamp": timestamp,
-            "environment": "production",
+            "environment": "local" if IS_LOCAL else "production",
             
             "decision": signal['signal'],
             "composite_score": composite['score'],
@@ -550,24 +588,29 @@ def test_polygon_delayed():
 # ============================================================================
 
 def poke_self():
-    """Background thread: Trigger analysis every 20 minutes during trading hours"""
+    """Background thread: Trigger analysis every 20 minutes during trading hours.
+    Not started when IS_LOCAL so one manual click = one run when testing.
+    """
     print("[POKE] Background thread started")
-    
+    # Use same host/port as the app so it works when PORT is overridden (e.g. Railway)
+    base_url = os.environ.get("POKE_BASE_URL", "http://localhost:8080")
+    timeout_sec = int(os.environ.get("POKE_TIMEOUT", "300"))  # 5 min; GPT can be slow
+
     while True:
         try:
             now = datetime.now(ET_TZ)
             current_time = now.time()
-            
+
             if is_within_trading_window(now):
                 if current_time.minute in [30, 50, 10] and current_time.second < 30:
                     print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
                     try:
-                        requests.get("http://localhost:8080/option_alpha_trigger", timeout=60)
+                        requests.get(f"{base_url}/option_alpha_trigger", timeout=timeout_sec)
                     except Exception as e:
                         print(f"[POKE] Error: {e}")
-            
+
             time_module.sleep(30)
-            
+
         except Exception as e:
             print(f"[POKE] Background error: {e}")
             time_module.sleep(60)
@@ -578,20 +621,25 @@ def poke_self():
 
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
-    
+
     print("=" * 80)
     print("Ren's SPX Vol Signal - Production (Polygon/Massive)")
     print("=" * 80)
     print(f"Port: {PORT}")
-    print(f"Trading Window: Mon-Fri, 1:30-2:30 PM ET")
+    print(f"Trading Window: {TRADING_WINDOW_LABEL}")
+    print(f"Environment: {ENVIRONMENT_LABEL}")
     print(f"Market Data: Polygon/Massive Indices Starter ($49/mo)")
     print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")
     print(f"VIX1D: Real I:VIX1D (15-min delayed, 1-day forward IV)")
     print("=" * 80)
-    
-    # Start background thread
-    t = threading.Thread(target=poke_self, daemon=True)
-    t.start()
-    
+
+    # Start POKE thread only in production so local = one click = one run
+    if not IS_LOCAL:
+        t = threading.Thread(target=poke_self, daemon=True)
+        t.start()
+        print("[POKE] Scheduler started (production)")
+    else:
+        print("[POKE] Scheduler disabled (local); trigger manually via /option_alpha_trigger")
+
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

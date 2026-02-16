@@ -33,6 +33,15 @@ SHEET_HEADERS = [
     "Raw_Articles",
     "Sent_To_GPT",
     "GPT_Reasoning",
+    # Contradiction detection
+    "Contradiction_Flags",
+    "Override_Applied",
+    "Score_Adjustment",
+    # Outcome tracking columns (filled later by validate_outcomes.py)
+    "SPX_Next_Open",
+    "SPX_Next_Close",
+    "Overnight_Move_Pct",
+    "Outcome_Correct",
 ]
 
 
@@ -111,6 +120,7 @@ def log_signal(
     vix1d_current: float,
     filter_stats: Dict[str, Any],
     webhook_success: bool,
+    contradictions: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
     print("[Sheets] log_signal called")
@@ -123,6 +133,16 @@ def log_signal(
         _ensure_header(ws)
 
         reasoning = (gpt.get("reasoning") or "")[:500]
+
+        # Contradiction fields
+        if contradictions:
+            flags_str = "; ".join(contradictions.get("contradiction_flags", [])) or "None"
+            override = contradictions.get("override_signal") or "None"
+            adj = contradictions.get("score_adjustment", 0)
+        else:
+            flags_str = "N/A"
+            override = "N/A"
+            adj = 0
 
         row: List[Any] = [
             timestamp,
@@ -145,6 +165,15 @@ def log_signal(
             filter_stats.get("raw_articles", ""),
             filter_stats.get("sent_to_gpt", ""),
             reasoning,
+            # Contradiction columns
+            flags_str,
+            override,
+            adj,
+            # Outcome columns — left blank, filled by validate_outcomes.py
+            "",  # SPX_Next_Open
+            "",  # SPX_Next_Close
+            "",  # Overnight_Move_Pct
+            "",  # Outcome_Correct
         ]
 
         ws.append_row(row, value_input_option="USER_ENTERED")

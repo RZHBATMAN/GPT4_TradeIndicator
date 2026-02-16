@@ -359,6 +359,7 @@ def option_alpha_trigger():
         factors = analysis_result['indicators']  # Internal: signal_engine uses 'indicators' key
         composite = analysis_result['composite']
         signal = analysis_result['signal']
+        contradictions = analysis_result.get('contradictions')
         
         iv_rv = factors['iv_rv']
         trend = factors['trend']
@@ -422,6 +423,17 @@ def option_alpha_trigger():
         # Send webhook
         webhook = send_webhook(signal)
 
+        # Log contradiction detection
+        if contradictions and contradictions.get('contradiction_flags'):
+            print(f"\n[{timestamp}] ========== CONTRADICTION DETECTION ==========")
+            for flag in contradictions['contradiction_flags']:
+                print(f"[{timestamp}]   - {flag}")
+            if contradictions.get('override_signal'):
+                print(f"[{timestamp}]   >>> OVERRIDE: {contradictions['override_signal']}")
+            if contradictions.get('score_adjustment'):
+                print(f"[{timestamp}]   >>> ADJUSTMENT: +{contradictions['score_adjustment']}")
+            print(f"[{timestamp}] =============================================\n")
+
         # Log to Google Sheet for history/backtesting (optional; no-op if not configured)
         log_signal_to_sheets(
             timestamp=timestamp,
@@ -434,6 +446,7 @@ def option_alpha_trigger():
             vix1d_current=vix1d_data["current"],
             filter_stats=news_data.get("filter_stats", {}),
             webhook_success=webhook.get("success", False),
+            contradictions=contradictions,
         )
 
         # Format news headlines

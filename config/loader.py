@@ -27,6 +27,7 @@ OPTIONAL_KEYS = [
     "MINIMAX_MODEL",  # e.g. MiniMax-M2.1, MiniMax-M2.1-lightning, MiniMax-M2; default MiniMax-M2.1
     "GOOGLE_SHEET_ID",
     "GOOGLE_CREDENTIALS_JSON",
+    "ALERT_WEBHOOK_URL",  # Slack incoming webhook URL for system failure alerts
 ]
 
 
@@ -53,6 +54,7 @@ def _load_from_file(config_path: Path) -> Optional[Dict[str, str]]:
             out["TRADE_NORMAL_URL"] = parser.get("WEBHOOKS", "TRADE_NORMAL_URL", fallback="").strip() or None
             out["TRADE_CONSERVATIVE_URL"] = parser.get("WEBHOOKS", "TRADE_CONSERVATIVE_URL", fallback="").strip() or None
             out["NO_TRADE_URL"] = parser.get("WEBHOOKS", "NO_TRADE_URL", fallback="").strip() or None
+            out["ALERT_WEBHOOK_URL"] = parser.get("WEBHOOKS", "ALERT_WEBHOOK_URL", fallback="").strip() or None
         if parser.has_section("GOOGLE_SHEETS"):
             out["GOOGLE_SHEET_ID"] = parser.get("GOOGLE_SHEETS", "GOOGLE_SHEET_ID", fallback="").strip() or None
             out["GOOGLE_CREDENTIALS_JSON"] = parser.get("GOOGLE_SHEETS", "GOOGLE_CREDENTIALS_JSON", fallback="").strip() or None

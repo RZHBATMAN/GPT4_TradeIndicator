@@ -14,6 +14,16 @@ from signal_engine import (
 )
 from signals.iv_rv_ratio import analyze_iv_rv_ratio
 from signals.market_trend import analyze_market_trend
+from alerting import (
+    record_signal_success,
+    record_api_failure,
+    record_poke,
+    check_end_of_window,
+    reset_daily,
+    get_alert_status,
+    _state,
+    _lock,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -440,3 +450,97 @@ class TestTermStructure:
         result = analyze_iv_rv_ratio(spx, vix1d)  # no vix_data
         assert 'term_structure' not in result
         assert 1 <= result['score'] <= 10
+
+
+# ── Alerting Tests ─────────────────────────────────────────────────────
+
+
+class TestAlerting:
+    """Test the alerting module state tracking."""
+
+    def _reset_state(self):
+        """Reset alerting state for clean tests."""
+        with _lock:
+            _state['last_signal_date'] = None
+            _state['last_signal_time'] = None
+            _state['last_poke_time'] = None
+            _state['consecutive_api_failures'] = 0
+            _state['api_failure_source'] = None
+            _state['alerts_sent_today'] = set()
+
+    def test_record_signal_success(self):
+        """Signal success should update state and reset failure counters."""
+        self._reset_state()
+        record_api_failure('Polygon_SPX')
+        assert _state['consecutive_api_failures'] == 1
+        record_signal_success()
+        assert _state['consecutive_api_failures'] == 0
+        assert _state['last_signal_date'] is not None
+
+    def test_consecutive_api_failures(self):
+        """API failures from the same source should increment the counter."""
+        self._reset_state()
+        record_api_failure('MiniMax')
+        assert _state['consecutive_api_failures'] == 1
+        record_api_failure('MiniMax')
+        assert _state['consecutive_api_failures'] == 2
+
+    def test_api_failure_source_change_resets(self):
+        """Switching API failure source should reset the counter."""
+        self._reset_state()
+        record_api_failure('Polygon_SPX')
+        record_api_failure('Polygon_SPX')
+        assert _state['consecutive_api_failures'] == 2
+        record_api_failure('MiniMax')
+        assert _state['consecutive_api_failures'] == 1
+        assert _state['api_failure_source'] == 'MiniMax'
+
+    def test_reset_daily(self):
+        """Daily reset should clear the alerts_sent_today set."""
+        self._reset_state()
+        _state['alerts_sent_today'].add('test_alert')
+        assert len(_state['alerts_sent_today']) == 1
+        reset_daily()
+        assert len(_state['alerts_sent_today']) == 0
+
+    def test_get_alert_status(self):
+        """Alert status should return current state as a dict."""
+        self._reset_state()
+        record_signal_success()
+        status = get_alert_status()
+        assert 'last_signal_date' in status
+        assert 'consecutive_api_failures' in status
+        assert status['consecutive_api_failures'] == 0
+
+
+# ── Backtest Module Tests ──────────────────────────────────────────────
+
+
+class TestBacktest:
+    """Test backtest helper functions (no API calls)."""
+
+    def test_stub_gpt(self):
+        """GPT stub should return correct category for score."""
+        from backtest import _stub_gpt
+        assert _stub_gpt(1)['category'] == 'VERY_QUIET'
+        assert _stub_gpt(4)['category'] == 'QUIET'
+        assert _stub_gpt(6)['category'] == 'MODERATE'
+        assert _stub_gpt(8)['category'] == 'ELEVATED'
+        assert _stub_gpt(10)['category'] == 'EXTREME'
+
+    def test_build_spx_data(self):
+        """SPX data builder should create valid dict."""
+        from backtest import _build_spx_data
+        bar = {'c': 5800, 'h': 5820, 'l': 5780, 'o': 5790}
+        closes = [5800, 5795, 5790]
+        result = _build_spx_data(closes, bar)
+        assert result['current'] == 5800
+        assert result['high_today'] == 5820
+        assert result['history_closes'] == closes
+
+    def test_build_vix1d_data(self):
+        """VIX1D data builder should create valid dict."""
+        from backtest import _build_vix1d_data
+        bar = {'c': 15.5}
+        result = _build_vix1d_data(bar)
+        assert result['current'] == 15.5

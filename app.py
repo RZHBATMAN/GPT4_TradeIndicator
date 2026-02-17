@@ -17,7 +17,7 @@ import requests
 
 # Import modular components
 from config.loader import get_config
-from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_spx_aggregates
+from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_vix_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_vix_snapshot, get_spx_aggregates
 from data.news_fetcher import fetch_news_raw
 from processing.pipeline import process_news_pipeline
 from signal_engine import run_signal_analysis
@@ -39,6 +39,9 @@ POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 
 # Derived: True when config was loaded from .config (local), False when env-only (e.g. Railway)
 IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
+
+# Signal consistency: store the first signal of the day to detect whiplash
+_daily_signal_cache = {'date': None, 'first_signal': None, 'first_score': None}
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
 POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
@@ -343,7 +346,10 @@ def option_alpha_trigger():
         vix1d_data = get_vix1d_with_retry(max_retries=3)
         if not vix1d_data:
             return jsonify({"status": "error", "message": "VIX1D data failed after 3 retries (Polygon)"}), 500
-        
+
+        # Fetch VIX (30-day) for term structure — non-critical, OK if it fails
+        vix_data = get_vix_with_retry(max_retries=2)
+
         # Fetch and process news
         print(f"[{timestamp}] Fetching news from RSS sources...")
         raw_articles = fetch_news_raw()
@@ -354,7 +360,7 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Analyzing factors...")
         
         # Use the signal engine to run all analysis
-        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data)
+        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
         
         factors = analysis_result['indicators']  # Internal: signal_engine uses 'indicators' key
         composite = analysis_result['composite']
@@ -375,6 +381,11 @@ def option_alpha_trigger():
         print(f"[{timestamp}]   - IV/RV Ratio: {iv_rv['iv_rv_ratio']:.3f}")
         if 'rv_change' in iv_rv:
             print(f"[{timestamp}]   - RV Change: {iv_rv['rv_change']*100:+.2f}%")
+        if 'term_structure_ratio' in iv_rv:
+            print(f"[{timestamp}]   - VIX (30-day): {iv_rv.get('vix_30d', 'N/A')}")
+            print(f"[{timestamp}]   - Term Structure: {iv_rv.get('term_structure', 'N/A')} (VIX1D/VIX = {iv_rv['term_structure_ratio']:.3f})")
+            if iv_rv.get('term_modifier', 0) > 0:
+                print(f"[{timestamp}]   - Term Structure Modifier: +{iv_rv['term_modifier']}")
         print(f"[{timestamp}]   - Factor Score: {iv_rv['score']:.1f}/10")
         print(f"[{timestamp}]   - Weighted Contribution: {iv_rv['score'] * 0.30:.2f}")
         
@@ -413,13 +424,49 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Category: {composite['category']}")
         print(f"[{timestamp}] Breakdown: ({iv_rv['score']:.1f} × 0.30) + ({trend['score']:.1f} × 0.20) + ({gpt['score']:.1f} × 0.50) = {composite['score']:.1f}")
         
+        # Signal consistency check: compare with first signal of the day
+        today_str = now.strftime('%Y-%m-%d')
+        consistency_note = None
+        if _daily_signal_cache['date'] != today_str:
+            # First signal of the day — cache it
+            _daily_signal_cache['date'] = today_str
+            _daily_signal_cache['first_signal'] = signal['signal']
+            _daily_signal_cache['first_score'] = composite['score']
+        else:
+            first = _daily_signal_cache['first_signal']
+            first_score = _daily_signal_cache['first_score']
+            current_sig = signal['signal']
+            tier_order = ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP']
+            first_idx = tier_order.index(first) if first in tier_order else -1
+            current_idx = tier_order.index(current_sig) if current_sig in tier_order else -1
+            tier_gap = abs(current_idx - first_idx)
+
+            if tier_gap >= 2:
+                # Whiplash detected: e.g. AGGRESSIVE→SKIP or NORMAL→SKIP
+                # Use the more conservative (higher index) signal
+                safer_signal = tier_order[max(first_idx, current_idx)]
+                consistency_note = (
+                    f"CONSISTENCY: Signal changed {first}(score={first_score:.1f}) → "
+                    f"{current_sig}(score={composite['score']:.1f}). "
+                    f"Gap={tier_gap} tiers. Using safer: {safer_signal}"
+                )
+                print(f"\n[{timestamp}] ⚠️  {consistency_note}")
+                if safer_signal != current_sig:
+                    signal = {
+                        'signal': safer_signal,
+                        'should_trade': safer_signal != 'SKIP',
+                        'reason': f"Consistency override: {consistency_note}"
+                    }
+
         # Final Signal
         print(f"\n[{timestamp}] ========== FINAL SIGNAL ==========")
         print(f"[{timestamp}] Signal: {signal['signal']}")
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
+        if consistency_note:
+            print(f"[{timestamp}] Consistency: {consistency_note}")
         print(f"[{timestamp}] ======================================\n")
-        
+
         # Send webhook
         webhook = send_webhook(signal)
 
@@ -504,7 +551,10 @@ def option_alpha_trigger():
                 "implied_vol": f"{iv_rv['implied_vol']}%",
                 "vix1d_value": iv_rv['vix1d_value'],
                 "tenor": "1-day (VIX1D)",
-                "source": "Polygon VIX1D (real data)"
+                "source": "Polygon VIX1D (real data)",
+                "vix_30d": iv_rv.get('vix_30d'),
+                "term_structure": iv_rv.get('term_structure'),
+                "term_structure_ratio": iv_rv.get('term_structure_ratio'),
             },
             
             "factor_2_trend": {
@@ -579,7 +629,14 @@ def test_polygon_delayed():
         'status': '✅ SUCCESS' if vix1d_snapshot else '❌ FAILED',
         'data': vix1d_snapshot
     }
-    
+
+    # Test VIX (30-day) snapshot
+    vix_snapshot = get_vix_snapshot()
+    results['vix_snapshot'] = {
+        'status': '✅ SUCCESS' if vix_snapshot else '❌ FAILED',
+        'data': vix_snapshot
+    }
+
     # Test SPX aggregates
     spx_agg = get_spx_aggregates()
     results['spx_aggregates'] = {

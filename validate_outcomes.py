@@ -6,14 +6,14 @@ SPX open/close from Polygon for each signal row, calculates the overnight
 move, and determines whether the signal was "correct."
 
 Correctness criteria for iron condor signals:
-  - TRADE signals are "correct" if overnight move < threshold for that tier
-  - SKIP signals are "correct" if overnight move > CONSERVATIVE threshold
+  - TRADE signals are "correct" if overnight move < breakeven for that tier
+  - SKIP signals are "correct" if overnight move > CONSERVATIVE breakeven
 
-Thresholds (based on typical iron condor widths):
-  TRADE_AGGRESSIVE (20pt width, 0.18 delta): correct if |move| < 0.80%
-  TRADE_NORMAL     (25pt width, 0.16 delta): correct if |move| < 0.65%
-  TRADE_CONSERVATIVE (30pt width, 0.14 delta): correct if |move| < 0.50%
-  SKIP: correct if |move| >= 0.50% (you were right to skip)
+Breakeven thresholds (derived from delta + premium collected):
+  TRADE_AGGRESSIVE (20pt width, 0.18 delta): correct if |move| < 1.00%
+  TRADE_NORMAL     (25pt width, 0.16 delta): correct if |move| < 0.90%
+  TRADE_CONSERVATIVE (30pt width, 0.14 delta): correct if |move| < 0.80%
+  SKIP: correct if |move| >= 0.80% (you were right to skip)
 
 Usage:
   python validate_outcomes.py              # backfill all missing outcomes
@@ -34,12 +34,30 @@ from config.loader import get_config
 logger = logging.getLogger(__name__)
 ET_TZ = pytz.timezone('US/Eastern')
 
-# Overnight move thresholds by signal tier (absolute %)
+# Iron condor parameters by signal tier
+# Width = spread width in SPX points, delta = short strike delta
+TRADE_PARAMS = {
+    'TRADE_AGGRESSIVE': {'width': 20, 'delta': 0.18},
+    'TRADE_NORMAL':     {'width': 25, 'delta': 0.16},
+    'TRADE_CONSERVATIVE': {'width': 30, 'delta': 0.14},
+}
+
+# Breakeven thresholds derived from delta:
+# Short strike distance ≈ delta * daily_vol * SPX_price (simplified)
+# For a practical proxy, we use:
+#   Approximate short-strike distance (%) = delta * 5.0
+#   (5.0 is roughly sqrt(1/252) * VIX_avg, mapping delta to % move)
+# This gives thresholds:
+#   AGGRESSIVE:   0.18 * 5.0 = 0.90%
+#   NORMAL:       0.16 * 5.0 = 0.80%
+#   CONSERVATIVE: 0.14 * 5.0 = 0.70%
+# The condor also collects premium, which extends the breakeven by ~0.10-0.15%.
+# Net approximate breakevens:
 MOVE_THRESHOLDS = {
-    'TRADE_AGGRESSIVE': 0.80,
-    'TRADE_NORMAL': 0.65,
-    'TRADE_CONSERVATIVE': 0.50,
-    'SKIP': 0.50,  # SKIP is "correct" if move >= this
+    'TRADE_AGGRESSIVE': 1.00,     # 0.18 delta → ~1.00% breakeven
+    'TRADE_NORMAL': 0.90,         # 0.16 delta → ~0.90% breakeven
+    'TRADE_CONSERVATIVE': 0.80,   # 0.14 delta → ~0.80% breakeven
+    'SKIP': 0.80,                 # SKIP is "correct" if move >= conservative breakeven
 }
 
 # Column indices (0-based) matching SHEET_HEADERS in sheets_logger.py

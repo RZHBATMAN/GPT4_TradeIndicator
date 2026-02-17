@@ -153,6 +153,83 @@ def get_spx_aggregates():
         return None
 
 
+def get_vix_snapshot():
+    """
+    Fetch VIX (30-day) current value from Polygon snapshot.
+    Used alongside VIX1D to detect term structure inversion.
+    """
+    config = get_config()
+    polygon_api_key = config.get('POLYGON_API_KEY')
+
+    try:
+        print("  [POLYGON] Fetching VIX (30-day) snapshot...")
+
+        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:VIX&apiKey={polygon_api_key}"
+        response = requests.get(url, timeout=15)
+
+        if response.status_code != 200:
+            print(f"  ❌ VIX snapshot failed: {response.status_code}")
+            return None
+
+        data = response.json()
+
+        if 'results' not in data or len(data['results']) == 0:
+            print(f"  ❌ No VIX results in snapshot")
+            return None
+
+        ticker_data = data['results'][0]
+
+        if 'error' in ticker_data:
+            print(f"  ❌ VIX error: {ticker_data.get('error')}")
+            return None
+
+        if ticker_data.get('ticker') != 'I:VIX':
+            print(f"  ❌ Unexpected ticker: {ticker_data.get('ticker')}")
+            return None
+
+        vix_snapshot = {
+            'current': ticker_data.get('value'),
+            'session': ticker_data.get('session', {}),
+            'timeframe': ticker_data.get('timeframe'),
+            'market_status': ticker_data.get('market_status')
+        }
+
+        print(f"  ✅ VIX (30-day): {vix_snapshot['current']:.2f} ({vix_snapshot['timeframe']})")
+
+        return vix_snapshot
+
+    except Exception as e:
+        print(f"  ❌ VIX snapshot error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_vix_with_retry(max_retries=3):
+    """Fetch VIX (30-day) with retry. Returns None on failure (non-critical)."""
+    for attempt in range(max_retries):
+        try:
+            snapshot = get_vix_snapshot()
+            if not snapshot:
+                if attempt < max_retries - 1:
+                    time_module.sleep(3)
+                continue
+
+            return {
+                'current': snapshot['current'],
+                'tenor': '30-day (VIX)',
+                'source': 'Polygon_VIX',
+                'timeframe': snapshot['timeframe'],
+            }
+        except Exception as e:
+            print(f"  ❌ VIX attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time_module.sleep(3)
+
+    print("  ⚠️ VIX (30-day) unavailable — term structure check skipped")
+    return None
+
+
 def get_spx_data_with_retry(max_retries=3):
     """Fetch SPX snapshot + aggregates with retry"""
     for attempt in range(max_retries):

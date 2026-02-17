@@ -2,6 +2,7 @@
 from signals.iv_rv_ratio import analyze_iv_rv_ratio
 from signals.market_trend import analyze_market_trend
 from signals.gpt_news import analyze_gpt_news
+from data.earnings_calendar import check_mag7_earnings
 
 
 def detect_contradictions(indicators):
@@ -130,14 +131,22 @@ def generate_signal(composite_score, contradiction_result=None):
         }
 
 
-def run_signal_analysis(spx_data, vix1d_data, news_data):
+def run_signal_analysis(spx_data, vix1d_data, news_data, vix_data=None):
     """Run all indicators and generate composite signal"""
     # Run all three indicators
-    iv_rv = analyze_iv_rv_ratio(spx_data, vix1d_data)
+    iv_rv = analyze_iv_rv_ratio(spx_data, vix1d_data, vix_data)
     trend = analyze_market_trend(spx_data)
     gpt = analyze_gpt_news(news_data)
 
     indicators = {'iv_rv': iv_rv, 'trend': trend, 'gpt': gpt}
+
+    # Check Mag 7 earnings calendar — acts as a safety net for GPT
+    earnings = check_mag7_earnings()
+    if earnings['risk_modifier'] > 0:
+        gpt_original = gpt['score']
+        gpt['score'] = min(10, gpt['score'] + earnings['risk_modifier'])
+        print(f"\n  [EARNINGS CALENDAR] {earnings['message']}")
+        print(f"    GPT score adjusted: {gpt_original} → {gpt['score']} (+{earnings['risk_modifier']})")
 
     # Detect contradictions between indicators
     contradiction = detect_contradictions(indicators)
@@ -161,5 +170,6 @@ def run_signal_analysis(spx_data, vix1d_data, news_data):
         'indicators': indicators,
         'composite': composite,
         'signal': signal,
-        'contradictions': contradiction
+        'contradictions': contradiction,
+        'earnings': earnings,
     }

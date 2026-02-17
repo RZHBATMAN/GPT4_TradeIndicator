@@ -143,11 +143,11 @@ class TestMarketTrend:
         assert result['score'] >= 7
 
     def test_strong_rally(self):
-        """> +4% 5d change → base score 5."""
+        """> +4% 5d change → base score 7 (symmetric with selloff)."""
         closes = [6100, 6050, 6000, 5950, 5900, 5800] + [5800] * 19
         spx = _make_spx_data(6100, 6110, 6050, closes)
         result = analyze_market_trend(spx)
-        assert result['score'] >= 5
+        assert result['score'] >= 7
 
     def test_wide_intraday_range(self):
         """> 1.5% intraday range → +2 modifier."""
@@ -160,9 +160,8 @@ class TestMarketTrend:
         # Base score 1 (flat 5d) + 2 (wide range) = 3
         assert result['score'] >= 3
 
-    def test_asymmetry_awareness(self):
-        """Document: -4% scores higher than +4% (7 vs 5).
-        This is intentional but users should know about the bias."""
+    def test_symmetry(self):
+        """Scoring is now symmetric: -4% and +4% produce the same base score."""
         closes_down = [5800, 5850, 5900, 5950, 6000, 6100] + [6100] * 19
         closes_up = [6100, 6050, 6000, 5950, 5900, 5800] + [5800] * 19
 
@@ -172,8 +171,9 @@ class TestMarketTrend:
         score_down = analyze_market_trend(spx_down)['score']
         score_up = analyze_market_trend(spx_up)['score']
 
-        # Down scores higher risk than equivalent up move
-        assert score_down > score_up
+        # Both should score >= 7 (>4% move), difference only from intraday range modifier
+        assert score_down >= 7
+        assert score_up >= 7
 
 
 # ── Composite Score Tests ────────────────────────────────────────────────
@@ -348,12 +348,12 @@ class TestRealWorldScenarios:
         assert composite['score'] >= 6.5
 
     def test_api_error_defaults(self):
-        """GPT error defaults to score 5. Should not produce AGGRESSIVE."""
-        indicators = _make_indicators(2, 2, 5)  # GPT default = 5
+        """GPT error defaults to score 7 (ELEVATED). Should produce CONSERVATIVE or SKIP."""
+        indicators = _make_indicators(2, 2, 7)  # GPT error default = 7
         composite = calculate_composite_score(indicators)
         signal = generate_signal(composite['score'])
-        # 0.6 + 0.4 + 2.5 = 3.5 → TRADE_NORMAL (not aggressive)
-        assert signal['signal'] != 'TRADE_AGGRESSIVE'
+        # 0.6 + 0.4 + 3.5 = 4.5 → TRADE_NORMAL (cautious, not aggressive)
+        assert signal['signal'] not in ('TRADE_AGGRESSIVE',)
 
 
 # ── Weight Sensitivity Tests ─────────────────────────────────────────────
@@ -385,3 +385,58 @@ class TestWeightSensitivity:
         score_low = calculate_composite_score(ind_low)['score']
         score_high = calculate_composite_score(ind_high)['score']
         assert abs((score_high - score_low) - 0.6) < 0.2
+
+
+# ── Term Structure Tests ─────────────────────────────────────────────────
+
+
+class TestTermStructure:
+    """Test VIX term structure modifier in IV/RV analysis."""
+
+    @staticmethod
+    def _flat_closes(n=25, price=5800.0):
+        daily_std = (12.0 / 100.0) / math.sqrt(252)
+        closes = [price]
+        for i in range(1, n):
+            direction = 1 if i % 2 == 0 else -1
+            closes.append(closes[-1] + direction * daily_std * closes[-1])
+        return closes
+
+    def test_contango_no_adjustment(self):
+        """VIX1D < VIX (contango) → no term structure modifier."""
+        closes = self._flat_closes()
+        spx = _make_spx_data(5800, 5810, 5790, closes)
+        vix1d = _make_vix1d_data(14.0)
+        vix = {'current': 18.0}  # VIX1D/VIX = 0.78 → contango
+        result = analyze_iv_rv_ratio(spx, vix1d, vix)
+        assert result.get('term_structure') == 'CONTANGO'
+        assert result.get('term_modifier', 0) == 0
+
+    def test_mild_inversion(self):
+        """VIX1D slightly > VIX → +1 modifier."""
+        closes = self._flat_closes()
+        spx = _make_spx_data(5800, 5810, 5790, closes)
+        vix1d = _make_vix1d_data(19.0)
+        vix = {'current': 18.0}  # VIX1D/VIX = 1.056 → mild inversion
+        result = analyze_iv_rv_ratio(spx, vix1d, vix)
+        assert result.get('term_structure') == 'INVERTED'
+        assert result.get('term_modifier') == 1
+
+    def test_strong_inversion(self):
+        """VIX1D >> VIX → +3 modifier (dangerous for overnight selling)."""
+        closes = self._flat_closes()
+        spx = _make_spx_data(5800, 5810, 5790, closes)
+        vix1d = _make_vix1d_data(22.0)
+        vix = {'current': 18.0}  # VIX1D/VIX = 1.22 → strong inversion
+        result = analyze_iv_rv_ratio(spx, vix1d, vix)
+        assert result.get('term_structure') == 'INVERTED'
+        assert result.get('term_modifier') == 3
+
+    def test_no_vix_data_graceful(self):
+        """If VIX (30-day) is unavailable, scoring works normally without modifier."""
+        closes = self._flat_closes()
+        spx = _make_spx_data(5800, 5810, 5790, closes)
+        vix1d = _make_vix1d_data(15.0)
+        result = analyze_iv_rv_ratio(spx, vix1d)  # no vix_data
+        assert 'term_structure' not in result
+        assert 1 <= result['score'] <= 10

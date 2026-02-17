@@ -12,12 +12,12 @@ def analyze_gpt_news(news_data):
     """LAYER 3: GPT analysis with significance-based time decay model"""
     
     if news_data['count'] == 0:
-        print("\n[LAYER 3] GPT ANALYSIS: Skipped (no news)")
+        print("\n[LAYER 3] GPT ANALYSIS: Skipped (no news) — defaulting to ELEVATED")
         return {
-            'score': 5,
-            'raw_score': 5,
-            'category': 'MODERATE',
-            'reasoning': 'No actionable news available - assuming moderate baseline risk',
+            'score': 7,
+            'raw_score': 7,
+            'category': 'ELEVATED',
+            'reasoning': 'No actionable news available - defaulting to elevated risk (no data = caution)',
             'direction_risk': 'UNKNOWN',
             'key_risk': 'None',
             'duplicates_found': 'None',
@@ -241,7 +241,7 @@ Respond in JSON only (no markdown):
             "model": minimax_model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1000,
-            "temperature": 0.3
+            "temperature": 0.1
         }
         
         response = requests.post(
@@ -252,14 +252,14 @@ Respond in JSON only (no markdown):
         )
         
         if response.status_code != 200:
-            print(f"  ❌ MiniMax API error: {response.status_code}")
+            print(f"  ❌ MiniMax API error: {response.status_code} — defaulting to ELEVATED")
             return {
-                'score': 5,
-                'raw_score': 5,
-                'category': 'MODERATE',
-                'reasoning': f'API error: {response.status_code}',
+                'score': 7,
+                'raw_score': 7,
+                'category': 'ELEVATED',
+                'reasoning': f'API error: {response.status_code} — defaulting to elevated risk (no analysis = caution)',
                 'direction_risk': 'UNKNOWN',
-                'key_risk': 'API Error',
+                'key_risk': 'API Error — no analysis performed',
                 'duplicates_found': 'Error',
                 'token_usage': {'input': 0, 'output': 0, 'total': 0, 'cost': 0.0}
             }
@@ -323,16 +323,16 @@ Respond in JSON only (no markdown):
         }
         
     except Exception as e:
-        print(f"  ❌ MiniMax error: {e}")
+        print(f"  ❌ MiniMax error: {e} — defaulting to ELEVATED")
         import traceback
         traceback.print_exc()
         return {
-            'score': 5,
-            'raw_score': 5,
-            'category': 'MODERATE',
-            'reasoning': f'MiniMax error: {str(e)}',
+            'score': 7,
+            'raw_score': 7,
+            'category': 'ELEVATED',
+            'reasoning': f'MiniMax error: {str(e)} — defaulting to elevated risk (no analysis = caution)',
             'direction_risk': 'UNKNOWN',
-            'key_risk': 'Error',
+            'key_risk': 'Error — no analysis performed',
             'duplicates_found': 'Error',
             'token_usage': {'input': 0, 'output': 0, 'total': 0, 'cost': 0.0}
         }

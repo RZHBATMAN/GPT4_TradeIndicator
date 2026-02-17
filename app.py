@@ -41,8 +41,10 @@ POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 # Derived: True when config was loaded from .config (local), False when env-only (e.g. Railway)
 IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
 
-# Signal consistency: store the first signal of the day to detect whiplash
-_daily_signal_cache = {'date': None, 'first_signal': None, 'first_score': None}
+# Signal consistency: track whether we've already sent a webhook today.
+# Once a webhook fires, Option Alpha creates a label and places a trade.
+# Subsequent pokes within the same day are logged but do NOT fire webhooks.
+_daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None}
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
 POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
@@ -217,24 +219,28 @@ def homepage():
             
             <div class="strategy-box">
                 <div class="strategy-title">🎯 Trading Strategy: Overnight Vol Premium Capture</div>
-                
+
                 <div class="edge-item">
                     <div class="edge-label">📈 Core Edge:</div>
                     <div class="edge-desc">
-                        Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility 
+                        Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility
                         and overnight news risk is manageable. Capture theta decay + vol premium during the ~16-hour overnight period.
+                        Exit at 10:00 AM next day via Option Alpha time-based exit.
                     </div>
                 </div>
-                
+
                 <div class="edge-item">
-                    <div class="edge-label">🔍 Trading Factors (3 Factors):</div>
+                    <div class="edge-label">🔍 Signal Factors (3 Factors + Safety Layers):</div>
                     <div class="edge-desc">
-                        <strong>1. IV/RV Ratio (30%):</strong> Real VIX1D (1-day forward IV) vs 10-day realized vol.<br>
-                        <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
-                        <strong>3. GPT News Analysis (50%):</strong> Triple-layer filtering (Algo dedup → Keyword → GPT).
+                        <strong>1. IV/RV Ratio + Term Structure (30%):</strong> VIX1D vs 10-day RV, plus VIX1D/VIX inversion detection.<br>
+                        <strong>2. Market Trend (20%):</strong> 5-day momentum + intraday volatility (symmetric scoring).<br>
+                        <strong>3. AI News Analysis (50%):</strong> Triple-layer filtering → MiniMax risk scoring.<br>
+                        <strong>+ Contradiction Detection:</strong> Override to SKIP when indicators conflict dangerously.<br>
+                        <strong>+ Mag 7 Earnings Calendar:</strong> Auto-boost risk score when major earnings are due.<br>
+                        <strong>+ Confirmation Pass:</strong> Runs analysis twice, uses the more conservative result.
                     </div>
                 </div>
-                
+
                 <div class="edge-item">
                     <div class="edge-label">⚡ Trade Sizing Logic:</div>
                     <div class="edge-desc">
@@ -242,6 +248,14 @@ def homepage():
                         <strong>NORMAL:</strong> Score 3.5-5.0 → 25pt width, 0.16 delta<br>
                         <strong>CONSERVATIVE:</strong> Score 5.0-7.5 → 30pt width, 0.14 delta<br>
                         <strong>SKIP:</strong> Score ≥7.5 → No trade
+                    </div>
+                </div>
+
+                <div class="edge-item">
+                    <div class="edge-label">🔒 Webhook Safety:</div>
+                    <div class="edge-desc">
+                        Only one webhook fires per trading day. Once Option Alpha receives the signal and places the trade,
+                        subsequent poke cycles log data to Sheets but do not send duplicate webhooks.
                     </div>
                 </div>
             </div>
@@ -281,12 +295,20 @@ def homepage():
                     <span class="info-value">Real I:VIX1D snapshot (15-min delayed, 1-day forward IV)</span>
                 </div>
                 <div class="info-item">
+                    <span class="info-label">VIX (30-day):</span>
+                    <span class="info-value">I:VIX for term structure analysis (contango vs inversion)</span>
+                </div>
+                <div class="info-item">
                     <span class="info-label">News Sources:</span>
                     <span class="info-value">Yahoo Finance RSS + Google News RSS (FREE)</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">AI Analysis:</span>
-                    <span class="info-value">MiniMax ({MINIMAX_MODEL_DISPLAY})</span>
+                    <span class="info-value">MiniMax ({MINIMAX_MODEL_DISPLAY}), temperature=0.1</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Earnings Calendar:</span>
+                    <span class="info-value">Polygon ticker events API (Mag 7 earnings dates)</span>
                 </div>
             </div>
             
@@ -428,51 +450,76 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Category: {composite['category']}")
         print(f"[{timestamp}] Breakdown: ({iv_rv['score']:.1f} × 0.30) + ({trend['score']:.1f} × 0.20) + ({gpt['score']:.1f} × 0.50) = {composite['score']:.1f}")
         
-        # Signal consistency check: compare with first signal of the day
-        today_str = now.strftime('%Y-%m-%d')
-        consistency_note = None
-        if _daily_signal_cache['date'] != today_str:
-            # First signal of the day — cache it
-            _daily_signal_cache['date'] = today_str
-            _daily_signal_cache['first_signal'] = signal['signal']
-            _daily_signal_cache['first_score'] = composite['score']
-        else:
-            first = _daily_signal_cache['first_signal']
-            first_score = _daily_signal_cache['first_score']
-            current_sig = signal['signal']
-            tier_order = ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP']
-            first_idx = tier_order.index(first) if first in tier_order else -1
-            current_idx = tier_order.index(current_sig) if current_sig in tier_order else -1
-            tier_gap = abs(current_idx - first_idx)
+        # ── Signal confirmation: run a second analysis pass ──
+        # MiniMax is non-deterministic. Before committing to a webhook (which
+        # triggers Option Alpha to place a real trade), run the signal pipeline
+        # a second time and use the MORE CONSERVATIVE of the two results.
+        # This costs one extra MiniMax call (~$0.01) but prevents the worst
+        # case: a lucky low GPT score triggering an aggressive trade.
+        print(f"\n[{timestamp}] ========== CONFIRMATION PASS ==========")
+        print(f"[{timestamp}] Running second analysis for signal confirmation...")
+        time_module.sleep(2)  # brief delay so MiniMax sees slightly different state
 
-            if tier_gap >= 2:
-                # Whiplash detected: e.g. AGGRESSIVE→SKIP or NORMAL→SKIP
-                # Use the more conservative (higher index) signal
-                safer_signal = tier_order[max(first_idx, current_idx)]
-                consistency_note = (
-                    f"CONSISTENCY: Signal changed {first}(score={first_score:.1f}) → "
-                    f"{current_sig}(score={composite['score']:.1f}). "
-                    f"Gap={tier_gap} tiers. Using safer: {safer_signal}"
-                )
-                print(f"\n[{timestamp}] ⚠️  {consistency_note}")
-                if safer_signal != current_sig:
-                    signal = {
-                        'signal': safer_signal,
-                        'should_trade': safer_signal != 'SKIP',
-                        'reason': f"Consistency override: {consistency_note}"
-                    }
+        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
+        composite_2 = analysis_result_2['composite']
+        signal_2 = analysis_result_2['signal']
+        contradictions_2 = analysis_result_2.get('contradictions')
+
+        # Pick the more conservative (higher composite = more cautious)
+        tier_order = ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP']
+        idx_1 = tier_order.index(signal['signal']) if signal['signal'] in tier_order else 3
+        idx_2 = tier_order.index(signal_2['signal']) if signal_2['signal'] in tier_order else 3
+
+        if idx_2 > idx_1:
+            # Second pass is more conservative — use it
+            print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
+            print(f"[{timestamp}] Pass 2: {signal_2['signal']} (score={composite_2['score']:.1f})")
+            print(f"[{timestamp}] → Using more conservative: {signal_2['signal']}")
+            signal = signal_2
+            composite = composite_2
+            contradictions = contradictions_2
+        elif idx_1 > idx_2:
+            print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
+            print(f"[{timestamp}] Pass 2: {signal_2['signal']} (score={composite_2['score']:.1f})")
+            print(f"[{timestamp}] → Using more conservative: {signal['signal']}")
+        else:
+            print(f"[{timestamp}] Both passes agree: {signal['signal']} ✓")
+        print(f"[{timestamp}] ========================================\n")
+
+        # ── Once-per-day webhook: only fire the first signal of each day ──
+        # Once OA receives a webhook, it creates a label and places a trade.
+        # Subsequent pokes on the same day are still logged (to Sheets) but
+        # do NOT fire another webhook — the trade is already placed.
+        today_str = now.strftime('%Y-%m-%d')
+        webhook_skipped = False
+
+        if _daily_signal_cache['date'] != today_str:
+            # New trading day — reset
+            _daily_signal_cache['date'] = today_str
+            _daily_signal_cache['webhook_sent'] = False
+            _daily_signal_cache['signal'] = None
+            _daily_signal_cache['score'] = None
 
         # Final Signal
         print(f"\n[{timestamp}] ========== FINAL SIGNAL ==========")
         print(f"[{timestamp}] Signal: {signal['signal']}")
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
-        if consistency_note:
-            print(f"[{timestamp}] Consistency: {consistency_note}")
-        print(f"[{timestamp}] ======================================\n")
 
-        # Send webhook
-        webhook = send_webhook(signal)
+        if _daily_signal_cache['webhook_sent']:
+            # Already sent today — log only, no webhook
+            webhook_skipped = True
+            prior = _daily_signal_cache['signal']
+            print(f"[{timestamp}] ⚠️  Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
+            webhook = {'success': True, 'skipped': True}
+        else:
+            # First signal of the day — fire webhook
+            webhook = send_webhook(signal)
+            _daily_signal_cache['webhook_sent'] = True
+            _daily_signal_cache['signal'] = signal['signal']
+            _daily_signal_cache['score'] = composite['score']
+            print(f"[{timestamp}] Webhook fired: {signal['signal']}")
+        print(f"[{timestamp}] ======================================\n")
 
         # Log contradiction detection
         if contradictions and contradictions.get('contradiction_flags'):

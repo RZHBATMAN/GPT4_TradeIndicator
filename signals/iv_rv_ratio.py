@@ -2,11 +2,14 @@
 import math
 
 
-def analyze_iv_rv_ratio(spx_data, vix1d_data):
+def analyze_iv_rv_ratio(spx_data, vix1d_data, vix_data=None):
     """
     Analyze IV/RV ratio using REAL VIX1D (1-day forward implied vol)
     VIX1D = 1-day forward implied volatility (perfect for overnight strategy!)
     RV = 10-day realized volatility
+
+    Optional vix_data: VIX (30-day) for term structure analysis.
+    VIX1D > VIX = inverted term structure = near-term fear = danger for overnight selling.
     """
     
     # Calculate 10-day Realized Volatility
@@ -47,7 +50,7 @@ def analyze_iv_rv_ratio(spx_data, vix1d_data):
     
     # RV change modifier
     if len(spx_data['history_closes']) >= 21:
-        closes_earlier = spx_data['history_closes'][10:21]
+        closes_earlier = spx_data['history_closes'][11:22]
         returns_earlier = []
         for i in range(1, len(closes_earlier)):
             returns_earlier.append(math.log(closes_earlier[i] / closes_earlier[i-1]))
@@ -70,9 +73,22 @@ def analyze_iv_rv_ratio(spx_data, vix1d_data):
         modifier = 0
         rv_change = 0
     
-    final_score = max(1, min(10, base_score + modifier))
-    
-    return {
+    # Term structure modifier: VIX1D vs VIX (30-day)
+    # VIX1D > VIX = inverted = market expects near-term turbulence
+    term_structure_ratio = None
+    term_modifier = 0
+    if vix_data and vix_data.get('current') and vix_data['current'] > 0:
+        vix_30d = vix_data['current']
+        term_structure_ratio = round(implied_vol / vix_30d, 3)
+        if term_structure_ratio > 1.10:
+            term_modifier = +3  # Strong inversion — very dangerous
+        elif term_structure_ratio > 1.00:
+            term_modifier = +1  # Mild inversion — caution
+        # Contango (ratio < 1.0) is normal, no adjustment
+
+    final_score = max(1, min(10, base_score + modifier + term_modifier))
+
+    result = {
         'score': final_score,
         'realized_vol': round(realized_vol, 2),
         'implied_vol': round(implied_vol, 2),
@@ -82,3 +98,11 @@ def analyze_iv_rv_ratio(spx_data, vix1d_data):
         'source': 'Polygon VIX1D (real data)',
         'rv_change': round(rv_change, 3)
     }
+
+    if vix_data and vix_data.get('current'):
+        result['vix_30d'] = round(vix_data['current'], 2)
+        result['term_structure_ratio'] = term_structure_ratio
+        result['term_structure'] = 'INVERTED' if term_structure_ratio > 1.0 else 'CONTANGO'
+        result['term_modifier'] = term_modifier
+
+    return result

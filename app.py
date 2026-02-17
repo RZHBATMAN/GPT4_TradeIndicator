@@ -23,6 +23,7 @@ from processing.pipeline import process_news_pipeline
 from signal_engine import run_signal_analysis
 from webhooks import send_webhook
 from sheets_logger import log_signal as log_signal_to_sheets
+from alerting import record_signal_success, record_api_failure, record_poke, check_end_of_window, reset_daily, get_alert_status
 
 app = Flask(__name__)
 
@@ -314,7 +315,8 @@ def health_check():
         "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
         "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
         "spx_data": "Real I:SPX (15-min delayed)",
-        "vix_data": "Real I:VIX1D (15-min delayed, 1-day forward IV)"
+        "vix_data": "Real I:VIX1D (15-min delayed, 1-day forward IV)",
+        "alerting": get_alert_status(),
     }), 200
 
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
@@ -340,11 +342,13 @@ def option_alpha_trigger():
         # Fetch SPX data (snapshot + aggregates)
         spx_data = get_spx_data_with_retry(max_retries=3)
         if not spx_data:
+            record_api_failure('Polygon_SPX')
             return jsonify({"status": "error", "message": "SPX data failed after 3 retries (Polygon)"}), 500
-        
+
         # Fetch VIX1D data
         vix1d_data = get_vix1d_with_retry(max_retries=3)
         if not vix1d_data:
+            record_api_failure('Polygon_VIX1D')
             return jsonify({"status": "error", "message": "VIX1D data failed after 3 retries (Polygon)"}), 500
 
         # Fetch VIX (30-day) for term structure — non-critical, OK if it fails
@@ -495,6 +499,9 @@ def option_alpha_trigger():
             webhook_success=webhook.get("success", False),
             contradictions=contradictions,
         )
+
+        # Record successful signal for alerting
+        record_signal_success()
 
         # Format news headlines
         news_headlines = []
@@ -673,13 +680,22 @@ def poke_self():
             now = datetime.now(ET_TZ)
             current_time = now.time()
 
+            # Reset alert dedup at midnight
+            if current_time.hour == 0 and current_time.minute == 0 and current_time.second < 30:
+                reset_daily()
+
             if is_within_trading_window(now):
+                record_poke()
                 if current_time.minute in [30, 50, 10] and current_time.second < 30:
                     print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
                     try:
                         requests.get(f"{base_url}/option_alpha_trigger", timeout=timeout_sec)
                     except Exception as e:
                         print(f"[POKE] Error: {e}")
+
+            # Check if window just ended (2:31-2:35 PM) and no signal was generated
+            if dt_time(14, 31) <= current_time <= dt_time(14, 35) and now.weekday() < 5:
+                check_end_of_window()
 
             time_module.sleep(30)
 

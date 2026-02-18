@@ -121,6 +121,18 @@ If you set up Slack alerting, you'll get automatic notifications for failures. B
 
 ---
 
+## Periodically: Check Slack for Warnings
+
+Once Slack alerting is configured (see [TODO.md](TODO.md)), glance at your alert channel occasionally. The system sends alerts for:
+
+- **"No Signal Generated Today"** — trading window ended with no signal. Something broke.
+- **"Polygon_SPX API Down" / "Polygon_VIX1D API Down"** — market data failed 2+ times in a row.
+- **"Poke Thread Stale"** — scheduler hasn't fired in 30+ min during trading hours. Railway may have restarted.
+
+If you see these frequently, dig into Railway logs for the root cause. If you never see them, the system is healthy.
+
+---
+
 ## Periodically: Review Google Sheets
 
 Open your signal log Sheet and scan for:

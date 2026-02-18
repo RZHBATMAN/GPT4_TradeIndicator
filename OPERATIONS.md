@@ -75,6 +75,28 @@ python backtest.py --sweep -v
 
 ---
 
+## Before Deploying: Test Locally First
+
+**`main` branch is production** — it's what Railway deploys. Never push untested changes directly to `main`.
+
+Workflow for any code change:
+
+1. Work on a development branch (not `main`)
+2. Run the full test suite locally:
+   ```bash
+   python -m pytest tests/test_signal_validation.py -v
+   ```
+3. Run the app locally and trigger a signal to do a full system-wise test:
+   ```bash
+   python app.py
+   # Then visit http://localhost:8080/option_alpha_trigger in your browser
+   ```
+   Local mode uses `.config` for credentials, opens the 24hr trading window, and disables the poke scheduler — so you can trigger manually any time.
+4. Verify the signal output, Sheets logging, and factor scores look correct
+5. Once confident, merge/push to `main` — Railway auto-deploys
+
+---
+
 ## After Code Changes: Run Tests
 
 ```bash
@@ -107,18 +129,3 @@ Open your signal log Sheet and scan for:
 - **Override_Applied column:** How often is SKIP being forced by the GPT >= 8 rule?
 - **Outcome_Correct column:** After running validate_outcomes.py, check win/loss distribution by tier.
 - **GPT_Score column:** Is MiniMax consistently scoring high or low? If it's always 3-4, it may not be adding value.
-
----
-
-## One-Time Setup Tasks
-
-These only need to be done once:
-
-### Set up Slack alerting
-1. Go to Slack > Apps > Incoming Webhooks
-2. Create a new webhook for your desired channel
-3. Add to Railway env var: `ALERT_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL`
-4. Or add to `.config` under `[WEBHOOKS]`: `ALERT_WEBHOOK_URL = https://hooks.slack.com/services/...`
-
-### Google Sheets setup
-See `docs/GOOGLE_SHEETS_SETUP.md` for full instructions.

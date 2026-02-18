@@ -8,9 +8,12 @@ Things to think about, decide on, or act on. These are not operational "run this
 
 ### Set up Slack alerting webhook
 The alerting system is built and integrated but needs a webhook URL to actually send notifications.
-- Create a free Slack incoming webhook
-- Set `ALERT_WEBHOOK_URL` in Railway env vars or `.config`
-- See [OPERATIONS.md](OPERATIONS.md) for step-by-step instructions
+
+**Steps:**
+1. Go to Slack > Apps > Incoming Webhooks
+2. Create a new webhook for your desired channel
+3. Add to Railway env var: `ALERT_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL`
+4. Or add to `.config` under `[WEBHOOKS]`: `ALERT_WEBHOOK_URL = https://hooks.slack.com/services/...`
 
 ---
 

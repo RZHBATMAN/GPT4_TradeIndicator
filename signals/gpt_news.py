@@ -10,7 +10,7 @@ ET_TZ = pytz.timezone('US/Eastern')
 
 def analyze_gpt_news(news_data):
     """LAYER 3: GPT analysis with significance-based time decay model"""
-    
+
     if news_data['count'] == 0:
         print("\n[LAYER 3] GPT ANALYSIS: Skipped (no news) — defaulting to ELEVATED")
         return {
@@ -23,14 +23,14 @@ def analyze_gpt_news(news_data):
             'duplicates_found': 'None',
             'token_usage': {'input': 0, 'output': 0, 'total': 0, 'cost': 0.0}
         }
-    
+
     config = get_config()
-    minimax_api_key = config.get('MINIMAX_API_KEY')
-    minimax_model = (config.get('MINIMAX_MODEL') or '').strip() or 'MiniMax-M2.1'
-    
+    openai_api_key = config.get('OPENAI_API_KEY')
+    openai_model = (config.get('OPENAI_MODEL') or '').strip() or 'gpt-4o-mini'
+
     now = datetime.now(ET_TZ)
     current_time_str = now.strftime("%I:%M %p ET")
-    
+
     prompt = f"""You are an expert overnight volatility risk analyst for SPX iron condor positions.
 
 CURRENT TIME: {current_time_str}
@@ -61,7 +61,7 @@ If you notice articles covering the SAME EVENT (algo may have missed some):
   * "Apple beats Q4 earnings forecast" (Bloomberg)
   * "Apple Q4 results exceed expectations" (Yahoo)
   → These are ONE event (Apple earnings), not three!
-  
+
 - How to spot: Same company + same event + similar timeframe = Duplicate
 - Don't let duplicates inflate your risk score
 - Report in "duplicates_found" field
@@ -74,12 +74,12 @@ Filter out sophisticated commentary that keyword filter may have missed:
   * "Warren Buffett dumps Apple - what it means" (analysis of known action)
   * "Why Nvidia's earnings matter for your portfolio" (opinion/advice)
   * "Here's how to play Tesla after earnings" (trading advice)
-  
+
 - Analysis of OLD events with fresh headlines:
   * "Markets digest yesterday's Fed decision" (old event)
   * "Investors react to last week's CPI print" (old data)
   * "Breaking down Apple's guidance from last quarter" (old news)
-  
+
 - Speculation dressed as news:
   * "Apple could announce new product if..." (speculation)
   * "What Tesla might do next quarter" (prediction)
@@ -228,31 +228,31 @@ Respond in JSON only (no markdown):
   "duplicates_found": "List any duplicate articles (same event from multiple sources), or 'None'"
 }}
 """
-    
-    print(f"\n[LAYER 3] GPT ANALYSIS: Calling MiniMax ({minimax_model}) with significance-time decay model...")
-    
+
+    print(f"\n[LAYER 3] GPT ANALYSIS: Calling OpenAI ({openai_model}) with significance-time decay model...")
+
     try:
         headers = {
-            "Authorization": f"Bearer {minimax_api_key}",
+            "Authorization": f"Bearer {openai_api_key}",
             "Content-Type": "application/json"
         }
-        
+
         data = {
-            "model": minimax_model,
+            "model": openai_model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1000,
             "temperature": 0.1
         }
-        
+
         response = requests.post(
-            "https://api.minimax.io/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions",
             headers=headers,
             json=data,
             timeout=60
         )
-        
+
         if response.status_code != 200:
-            print(f"  ❌ MiniMax API error: {response.status_code} — defaulting to ELEVATED")
+            print(f"  ❌ OpenAI API error: {response.status_code} — defaulting to ELEVATED")
             return {
                 'score': 7,
                 'raw_score': 7,
@@ -263,34 +263,35 @@ Respond in JSON only (no markdown):
                 'duplicates_found': 'Error',
                 'token_usage': {'input': 0, 'output': 0, 'total': 0, 'cost': 0.0}
             }
-        
+
         result = response.json()
-        
+
         # Extract token usage
         usage = result.get('usage', {})
         input_tokens = usage.get('prompt_tokens', 0)
         output_tokens = usage.get('completion_tokens', 0)
         total_tokens = usage.get('total_tokens', 0)
-        
-        # MiniMax pricing varies by model; log usage only
-        total_cost = 0.0
-        
+
+        # Cost estimate (gpt-4o-mini: $0.15/1M input, $0.60/1M output)
+        total_cost = (input_tokens * 0.15 / 1_000_000) + (output_tokens * 0.60 / 1_000_000)
+
         print(f"  📊 TOKEN USAGE:")
         print(f"     Input tokens:  {input_tokens:,}")
         print(f"     Output tokens: {output_tokens:,}")
         print(f"     Total tokens:  {total_tokens:,}")
-        
+        print(f"     Est. cost:     ${total_cost:.4f}")
+
         response_text = result['choices'][0]['message']['content'].strip()
-        
+
         if response_text.startswith('```'):
             response_text = response_text.split('```')[1]
             if response_text.startswith('json'):
                 response_text = response_text[4:]
-        
+
         gpt_analysis = json.loads(response_text)
         raw_score = gpt_analysis.get('overnight_magnitude_risk_score', 5)
         raw_score = max(1, min(10, raw_score))
-        
+
         # Calibration (less aggressive now since GPT has better framework)
         if raw_score >= 9:
             calibrated = raw_score
@@ -300,12 +301,12 @@ Respond in JSON only (no markdown):
             calibrated = raw_score + 0.5
         else:
             calibrated = raw_score
-        
+
         calibrated = max(1, min(10, round(calibrated)))
-        
-        print(f"  ✅ MiniMax Risk Score: {raw_score} (calibrated: {calibrated})")
+
+        print(f"  ✅ GPT Risk Score: {raw_score} (calibrated: {calibrated})")
         print(f"  ✅ Category: {gpt_analysis.get('risk_category', 'MODERATE')}")
-        
+
         return {
             'score': calibrated,
             'raw_score': raw_score,
@@ -321,16 +322,16 @@ Respond in JSON only (no markdown):
                 'cost': total_cost
             }
         }
-        
+
     except Exception as e:
-        print(f"  ❌ MiniMax error: {e} — defaulting to ELEVATED")
+        print(f"  ❌ OpenAI error: {e} — defaulting to ELEVATED")
         import traceback
         traceback.print_exc()
         return {
             'score': 7,
             'raw_score': 7,
             'category': 'ELEVATED',
-            'reasoning': f'MiniMax error: {str(e)} — defaulting to elevated risk (no analysis = caution)',
+            'reasoning': f'OpenAI error: {str(e)} — defaulting to elevated risk (no analysis = caution)',
             'direction_risk': 'UNKNOWN',
             'key_risk': 'Error — no analysis performed',
             'duplicates_found': 'Error',

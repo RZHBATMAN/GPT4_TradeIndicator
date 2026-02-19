@@ -36,12 +36,12 @@ Railway (24/7)
        ├─ 5. Process news through triple-layer pipeline
        │     • Layer 1: Fuzzy deduplication (85% similarity)
        │     • Layer 2: Keyword junk filter + priority tagging
-       │     • Layer 3: MiniMax AI analysis (see below)
+       │     • Layer 3: OpenAI GPT analysis (see below)
        │
        ├─ 6. Run three signal factors
        │     • Factor 1 - IV/RV Ratio + Term Structure (30%)
        │     • Factor 2 - Market Trend (20%)
-       │     • Factor 3 - MiniMax News Risk (50%)
+       │     • Factor 3 - GPT News Risk (50%)
        │
        ├─ 7. Safety layers
        │     • Mag 7 earnings calendar check
@@ -106,9 +106,9 @@ Scoring is symmetric: +4% and -4% both score 7. Iron condors lose on large moves
 
 **Intraday range modifier:** >1.5% adds +2, 1.0-1.5% adds +1.
 
-### Factor 3: MiniMax News Risk (50% weight)
+### Factor 3: GPT News Risk (50% weight)
 
-The dominant factor. Calls MiniMax AI (default model: MiniMax-M2.1, temperature=0.1) with a prompt that implements a 4-responsibility framework:
+The dominant factor. Calls OpenAI (default model: gpt-4o-mini, temperature=0.1) with a prompt that implements a 4-responsibility framework:
 
 1. **Duplication safety net** — catches duplicates the algo layer missed
 2. **Commentary filter** — removes analysis of old events, speculation, advice
@@ -135,7 +135,7 @@ Clamped to 1.0-10.0.
 
 ### Confirmation Pass
 
-The signal pipeline runs twice per trigger. MiniMax is non-deterministic — the same news can produce different scores. Rather than trusting a single call, the system runs both, then uses the **more conservative** (higher-tier) result. This costs one extra MiniMax call (~$0.01) but prevents a lucky low score from triggering an aggressive trade.
+The signal pipeline runs twice per trigger. GPT is non-deterministic — the same news can produce different scores. Rather than trusting a single call, the system runs both, then uses the **more conservative** (higher-tier) result. This costs one extra OpenAI call but prevents a lucky low score from triggering an aggressive trade.
 
 ### Once-Per-Day Webhook
 
@@ -160,7 +160,7 @@ Checks Polygon's earnings events API for AAPL, MSFT, GOOGL, AMZN, NVDA, TSLA, ME
 
 Sends Slack-compatible webhook alerts when:
 - No signal generated during a trading day
-- Polygon or MiniMax API fails 2+ times consecutively
+- Polygon or OpenAI API fails 2+ times consecutively
 - Poke thread hasn't fired in 30+ minutes during trading hours
 
 Configure via `ALERT_WEBHOOK_URL` (env var or .config).
@@ -191,8 +191,8 @@ Each signal fires a distinct Option Alpha webhook URL. Option Alpha handles the 
 - **Removes junk:** "secret to", "trick to", "X ways to", "you won't believe", old recaps
 - **Tags HIGH priority:** earnings beats/misses, guidance changes, stock moves >10%, Mag 7 news, M&A, SEC/FDA decisions
 
-### Layer 3: MiniMax AI Analysis (`signals/gpt_news.py`)
-- Top 30 filtered articles formatted with recency labels and sent to MiniMax
+### Layer 3: OpenAI GPT Analysis (`signals/gpt_news.py`)
+- Top 30 filtered articles formatted with recency labels and sent to OpenAI GPT
 - AI performs its own dedup check, filters commentary, classifies significance, assesses time decay
 - Returns a structured JSON risk assessment
 
@@ -207,7 +207,7 @@ Each signal fires a distinct Option Alpha webhook URL. Option Alpha handles the 
 | VIX (30-day) | Polygon/Massive Indices Starter | (included) | 15-min |
 | Mag 7 earnings | Polygon ticker events API | (included) | N/A |
 | News | Yahoo Finance RSS + Google News RSS | Free | Real-time |
-| AI analysis | MiniMax API (MiniMax-M2.1) | Usage-based | ~5-15s |
+| AI analysis | OpenAI API (gpt-4o-mini) | Usage-based | ~5-15s |
 
 ---
 
@@ -246,7 +246,7 @@ GPT4_TradeIndicator/
 │   ├── __init__.py
 │   ├── iv_rv_ratio.py          # Factor 1: IV/RV ratio + term structure (30%)
 │   ├── market_trend.py         # Factor 2: 5-day momentum + intraday range (20%)
-│   └── gpt_news.py             # Factor 3: MiniMax news risk analysis (50%)
+│   └── gpt_news.py             # Factor 3: GPT news risk analysis (50%)
 │
 ├── tests/
 │   ├── __init__.py
@@ -266,7 +266,7 @@ Two-tier config: local `.config` file takes precedence over environment variable
 
 | Key | What it is |
 |-----|-----------|
-| `MINIMAX_API_KEY` | MiniMax AI API key |
+| `OPENAI_API_KEY` | OpenAI API key |
 | `POLYGON_API_KEY` | Polygon/Massive market data key |
 | `TRADE_AGGRESSIVE_URL` | Option Alpha webhook for score < 3.5 |
 | `TRADE_NORMAL_URL` | Option Alpha webhook for score 3.5-5.0 |
@@ -277,7 +277,7 @@ Two-tier config: local `.config` file takes precedence over environment variable
 
 | Key | What it is |
 |-----|-----------|
-| `MINIMAX_MODEL` | Override AI model (default: MiniMax-M2.1) |
+| `OPENAI_MODEL` | Override AI model (default: gpt-4o-mini) |
 | `GOOGLE_SHEET_ID` | Google Sheet ID for signal logging |
 | `GOOGLE_CREDENTIALS_JSON` | Service account JSON (single line) |
 | `ALERT_WEBHOOK_URL` | Slack incoming webhook for system failure alerts |
@@ -304,6 +304,7 @@ When running on Railway (no `.config` file):
 | `/health` | GET | JSON health check + alerting status |
 | `/option_alpha_trigger` | GET, POST | Run full signal pipeline, fire webhook, log to Sheets |
 | `/test_polygon_delayed` | GET | Test Polygon connectivity (SPX + VIX1D + VIX) |
+| `/test_slack` | GET | Send test Slack alert to verify webhook |
 
 ---
 
@@ -319,7 +320,7 @@ Every signal run appends a row with 27 columns. First 23 columns fill at signal 
 |------|-------------|
 | Railway hosting | ~$5 |
 | Polygon/Massive Indices Starter | $49 |
-| MiniMax API | ~$2-5 (x2 calls per signal for confirmation) |
+| OpenAI API (gpt-4o-mini) | ~$1-3 (x2 calls per signal for confirmation) |
 | Google Sheets | Free |
 | News RSS feeds | Free |
-| **Total** | **~$56-59/mo** |
+| **Total** | **~$55-57/mo** |

@@ -97,12 +97,19 @@ def _client_and_sheet():
 
 
 def _ensure_header(ws) -> None:
-    """If worksheet is empty, append header row."""
+    """Insert header row if missing, or update it if columns were added since last run."""
     try:
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != SHEET_HEADERS[0]:
             ws.insert_row(SHEET_HEADERS, 1)
             print("[Sheets] Header row inserted (first run)")
+        elif len(first_row) < len(SHEET_HEADERS):
+            # Header exists but is shorter than current SHEET_HEADERS — patch missing columns
+            missing = SHEET_HEADERS[len(first_row):]
+            start_col = len(first_row) + 1  # 1-indexed
+            for i, hdr in enumerate(missing):
+                ws.update_cell(1, start_col + i, hdr)
+            print(f"[Sheets] Header row extended: added {len(missing)} new columns ({', '.join(missing)})")
     except Exception as e:
         print(f"[Sheets] Could not ensure header row: {e}")
         logger.warning("Could not ensure header row: %s", e)

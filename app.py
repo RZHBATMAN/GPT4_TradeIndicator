@@ -48,8 +48,8 @@ _daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'sco
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
 POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
-# MiniMax model in use (default MiniMax-M2.1 if not set)
-MINIMAX_MODEL_DISPLAY = (CONFIG.get("MINIMAX_MODEL") or "").strip() or "MiniMax-M2.1"
+# OpenAI model in use (default gpt-4o-mini if not set)
+OPENAI_MODEL_DISPLAY = (CONFIG.get("OPENAI_MODEL") or "").strip() or "gpt-4o-mini"
 
 # ============================================================================
 # TRADING WINDOW CHECK
@@ -234,7 +234,7 @@ def homepage():
                     <div class="edge-desc">
                         <strong>1. IV/RV Ratio + Term Structure (30%):</strong> VIX1D vs 10-day RV, plus VIX1D/VIX inversion detection.<br>
                         <strong>2. Market Trend (20%):</strong> 5-day momentum + intraday volatility (symmetric scoring).<br>
-                        <strong>3. AI News Analysis (50%):</strong> Triple-layer filtering → MiniMax risk scoring.<br>
+                        <strong>3. AI News Analysis (50%):</strong> Triple-layer filtering → GPT risk scoring.<br>
                         <strong>+ Contradiction Detection:</strong> Override to SKIP when indicators conflict dangerously.<br>
                         <strong>+ Mag 7 Earnings Calendar:</strong> Auto-boost risk score when major earnings are due.<br>
                         <strong>+ Confirmation Pass:</strong> Runs analysis twice, uses the more conservative result.
@@ -304,7 +304,7 @@ def homepage():
                 </div>
                 <div class="info-item">
                     <span class="info-label">AI Analysis:</span>
-                    <span class="info-value">MiniMax ({MINIMAX_MODEL_DISPLAY}), temperature=0.1</span>
+                    <span class="info-value">OpenAI ({OPENAI_MODEL_DISPLAY}), temperature=0.1</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">Earnings Calendar:</span>
@@ -317,6 +317,7 @@ def homepage():
                 <div class="endpoint"><a href="/health">/health</a> - Health check</div>
                 <div class="endpoint"><a href="/option_alpha_trigger">/option_alpha_trigger</a> - Generate trading signal</div>
                 <div class="endpoint"><a href="/test_polygon_delayed">/test_polygon_delayed</a> - Test Polygon data</div>
+                <div class="endpoint"><a href="/test_slack">/test_slack</a> - Send test Slack alert</div>
             </div>
         </div>
     </body>
@@ -451,14 +452,14 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Breakdown: ({iv_rv['score']:.1f} × 0.30) + ({trend['score']:.1f} × 0.20) + ({gpt['score']:.1f} × 0.50) = {composite['score']:.1f}")
         
         # ── Signal confirmation: run a second analysis pass ──
-        # MiniMax is non-deterministic. Before committing to a webhook (which
+        # GPT is non-deterministic. Before committing to a webhook (which
         # triggers Option Alpha to place a real trade), run the signal pipeline
         # a second time and use the MORE CONSERVATIVE of the two results.
-        # This costs one extra MiniMax call (~$0.01) but prevents the worst
-        # case: a lucky low GPT score triggering an aggressive trade.
+        # This costs one extra OpenAI call but prevents the worst case:
+        # a lucky low GPT score triggering an aggressive trade.
         print(f"\n[{timestamp}] ========== CONFIRMATION PASS ==========")
         print(f"[{timestamp}] Running second analysis for signal confirmation...")
-        time_module.sleep(2)  # brief delay so MiniMax sees slightly different state
+        time_module.sleep(2)  # brief delay so GPT sees slightly different state
 
         analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
         composite_2 = analysis_result_2['composite']
@@ -709,6 +710,47 @@ def test_polygon_delayed():
     
     return jsonify(results), 200
 
+@app.route("/test_slack", methods=["GET"])
+def test_slack():
+    """Send a test alert to Slack to verify webhook configuration."""
+    from alerting import _send_alert
+
+    now = datetime.now(ET_TZ)
+    timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+
+    success = _send_alert(
+        "Test Alert",
+        "This is a test alert from Ren's SPX Vol Signal. "
+        "If you see this in Slack, alerting is working correctly!",
+        level='info',
+    )
+
+    if success:
+        return jsonify({
+            "status": "success",
+            "message": "Test alert sent to Slack successfully!",
+            "timestamp": timestamp,
+        }), 200
+    else:
+        # Check if webhook is configured at all
+        from alerting import _get_webhook_url
+        url = _get_webhook_url()
+        if not url:
+            return jsonify({
+                "status": "error",
+                "message": "ALERT_WEBHOOK_URL is not configured. "
+                           "Add it to .config [WEBHOOKS] section or set as env var.",
+                "timestamp": timestamp,
+            }), 400
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Webhook is configured but the alert failed to send. "
+                           "Check that the URL is a valid Slack incoming webhook.",
+                "webhook_url_prefix": url[:40] + "...",
+                "timestamp": timestamp,
+            }), 500
+
 # ============================================================================
 # BACKGROUND THREAD
 # ============================================================================
@@ -767,7 +809,7 @@ if __name__ == "__main__":
     print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")
     print(f"VIX1D: Real I:VIX1D (15-min delayed, 1-day forward IV)")
-    print(f"AI Analysis: MiniMax ({MINIMAX_MODEL_DISPLAY})")
+    print(f"AI Analysis: OpenAI ({OPENAI_MODEL_DISPLAY})")
     print("=" * 80)
 
     # Start POKE thread only in production so local = one click = one run

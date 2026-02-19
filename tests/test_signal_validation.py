@@ -480,9 +480,9 @@ class TestAlerting:
     def test_consecutive_api_failures(self):
         """API failures from the same source should increment the counter."""
         self._reset_state()
-        record_api_failure('MiniMax')
+        record_api_failure('OpenAI')
         assert _state['consecutive_api_failures'] == 1
-        record_api_failure('MiniMax')
+        record_api_failure('OpenAI')
         assert _state['consecutive_api_failures'] == 2
 
     def test_api_failure_source_change_resets(self):
@@ -491,9 +491,9 @@ class TestAlerting:
         record_api_failure('Polygon_SPX')
         record_api_failure('Polygon_SPX')
         assert _state['consecutive_api_failures'] == 2
-        record_api_failure('MiniMax')
+        record_api_failure('OpenAI')
         assert _state['consecutive_api_failures'] == 1
-        assert _state['api_failure_source'] == 'MiniMax'
+        assert _state['api_failure_source'] == 'OpenAI'
 
     def test_reset_daily(self):
         """Daily reset should clear the alerts_sent_today set."""

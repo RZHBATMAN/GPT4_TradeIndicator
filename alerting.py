@@ -2,7 +2,7 @@
 
 Tracks signal generation during trading windows and alerts on:
   - No signal generated during a trading day
-  - Consecutive API failures (Polygon or MiniMax)
+  - Consecutive API failures (Polygon or OpenAI)
   - Poke thread not firing during trading hours
 
 Notifications are sent via a configurable webhook URL (e.g. Slack incoming webhook).
@@ -81,7 +81,7 @@ def record_signal_success():
 
 
 def record_api_failure(source):
-    """Call this when an API call fails (e.g. 'Polygon', 'MiniMax').
+    """Call this when an API call fails (e.g. 'Polygon', 'OpenAI').
 
     Sends an alert after 2 consecutive failures from the same source.
     """

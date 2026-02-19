@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Keys required for the app (same names as env vars)
 REQUIRED_KEYS = [
-    "MINIMAX_API_KEY",
+    "OPENAI_API_KEY",
     "POLYGON_API_KEY",
     "TRADE_AGGRESSIVE_URL",
     "TRADE_NORMAL_URL",
@@ -24,7 +24,7 @@ REQUIRED_KEYS = [
 
 # Optional
 OPTIONAL_KEYS = [
-    "MINIMAX_MODEL",  # e.g. MiniMax-M2.1, MiniMax-M2.1-lightning, MiniMax-M2; default MiniMax-M2.1
+    "OPENAI_MODEL",  # e.g. gpt-4o-mini, gpt-4o, gpt-4.1-mini; default gpt-4o-mini
     "GOOGLE_SHEET_ID",
     "GOOGLE_CREDENTIALS_JSON",
     "ALERT_WEBHOOK_URL",  # Slack incoming webhook URL for system failure alerts
@@ -46,9 +46,9 @@ def _load_from_file(config_path: Path) -> Optional[Dict[str, str]]:
         parser.read(config_path, encoding="utf-8")
         out: Dict[str, str] = {}
         if parser.has_section("API_KEYS"):
-            out["MINIMAX_API_KEY"] = parser.get("API_KEYS", "MINIMAX_API_KEY", fallback="").strip() or None
+            out["OPENAI_API_KEY"] = parser.get("API_KEYS", "OPENAI_API_KEY", fallback="").strip() or None
             out["POLYGON_API_KEY"] = parser.get("API_KEYS", "POLYGON_API_KEY", fallback="").strip() or None
-            out["MINIMAX_MODEL"] = parser.get("API_KEYS", "MINIMAX_MODEL", fallback="").strip() or None
+            out["OPENAI_MODEL"] = parser.get("API_KEYS", "OPENAI_MODEL", fallback="").strip() or None
         if parser.has_section("WEBHOOKS"):
             out["TRADE_AGGRESSIVE_URL"] = parser.get("WEBHOOKS", "TRADE_AGGRESSIVE_URL", fallback="").strip() or None
             out["TRADE_NORMAL_URL"] = parser.get("WEBHOOKS", "TRADE_NORMAL_URL", fallback="").strip() or None

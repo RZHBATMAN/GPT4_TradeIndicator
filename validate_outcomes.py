@@ -227,6 +227,11 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
 
         # Skip if missing critical data
         if not timestamp or not signal or not spx_current_str:
+            missing = []
+            if not timestamp: missing.append("timestamp")
+            if not signal: missing.append("signal")
+            if not spx_current_str: missing.append("SPX_current")
+            print(f"  Row {row_idx + 1}: SKIPPED — missing {', '.join(missing)}")
             continue
 
         try:

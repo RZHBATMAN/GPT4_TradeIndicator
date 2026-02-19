@@ -280,13 +280,51 @@ Respond in JSON only (no markdown):
         print(f"     Output tokens: {output_tokens:,}")
         print(f"     Total tokens:  {total_tokens:,}")
         
-        response_text = result['choices'][0]['message']['content'].strip()
-        
+        # Extract response text — MiniMax sometimes returns None or empty content
+        raw_content = result['choices'][0]['message'].get('content')
+        finish_reason = result['choices'][0].get('finish_reason', 'unknown')
+
+        if not raw_content or not raw_content.strip():
+            print(f"  ⚠️  MiniMax returned empty content (finish_reason={finish_reason})")
+            print(f"  ⚠️  Full response keys: {list(result.keys())}")
+
+            # Retry once — MiniMax empty responses are usually transient
+            print(f"  🔄 Retrying MiniMax call...")
+            import time as _time
+            _time.sleep(2)
+            retry_resp = requests.post(
+                "https://api.minimax.io/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=60
+            )
+            if retry_resp.status_code == 200:
+                retry_result = retry_resp.json()
+                retry_usage = retry_result.get('usage', {})
+                print(f"  📊 RETRY TOKEN USAGE: {retry_usage.get('total_tokens', 0):,} tokens")
+                raw_content = retry_result['choices'][0]['message'].get('content')
+                finish_reason = retry_result['choices'][0].get('finish_reason', 'unknown')
+
+            if not raw_content or not raw_content.strip():
+                print(f"  ❌ MiniMax returned empty content again (finish_reason={finish_reason}) — defaulting to ELEVATED")
+                return {
+                    'score': 7,
+                    'raw_score': 7,
+                    'category': 'ELEVATED',
+                    'reasoning': f'MiniMax returned empty response (finish_reason={finish_reason}) — defaulting to elevated risk',
+                    'direction_risk': 'UNKNOWN',
+                    'key_risk': 'Error — empty MiniMax response',
+                    'duplicates_found': 'Error',
+                    'token_usage': {'input': input_tokens, 'output': output_tokens, 'total': total_tokens, 'cost': 0.0}
+                }
+
+        response_text = raw_content.strip()
+
         if response_text.startswith('```'):
             response_text = response_text.split('```')[1]
             if response_text.startswith('json'):
                 response_text = response_text[4:]
-        
+
         gpt_analysis = json.loads(response_text)
         raw_score = gpt_analysis.get('overnight_magnitude_risk_score', 5)
         raw_score = max(1, min(10, raw_score))

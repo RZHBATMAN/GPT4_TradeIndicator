@@ -107,6 +107,26 @@ python -m pytest tests/test_signal_validation.py -v
 
 ---
 
+## Annually (Dec/Jan): Update OA Event Calendar
+
+The file `data/oa_event_calendar.py` contains static date sets for FOMC meetings, CPI releases, and NYSE early closes. These match the Option Alpha decision recipe gates. **Update this file once a year** when the Fed and BLS publish their next-year schedules.
+
+**When to do it:** Late November / early December, when both agencies have published their next-year calendars.
+
+**Sources:**
+- FOMC dates: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+- CPI dates: https://www.bls.gov/schedule/news_release/cpi.htm
+- NYSE early closes: https://www.nyse.com/markets/hours-calendars
+
+**What to update in `data/oa_event_calendar.py`:**
+1. Add the new year's FOMC meeting dates to `FOMC_DATES` (both days of each 2-day meeting)
+2. Add the new year's CPI release dates to `CPI_DATES`
+3. Add the new year's NYSE early close dates to `EARLY_CLOSE_DATES` (typically: day before July 4, Black Friday, Christmas Eve)
+
+**If you forget:** The calendar won't detect event gates for dates it doesn't know about. Trades will still fire on FOMC/CPI days, but `Trade_Executed` will say `YES` instead of `NO_OA_EVENT` — so the Sheet log won't accurately reflect what OA actually did. The trades themselves are still gated by OA's own recipe, so no real harm, just inaccurate logging.
+
+---
+
 ## Periodically: Check Railway Logs
 
 Check Railway deploy logs to verify the system is healthy:

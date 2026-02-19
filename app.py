@@ -13,6 +13,7 @@ import pytz
 import os
 import threading
 import time as time_module
+import random
 import requests
 
 # Import modular components
@@ -507,7 +508,15 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
 
-        if _daily_signal_cache['webhook_sent']:
+        is_friday = now.weekday() == 4
+
+        if is_friday:
+            # Friday: log signal to Sheets for validation, but do NOT send webhook
+            # (no live trades on Fridays — weekend theta decay risk)
+            webhook_skipped = True
+            print(f"[{timestamp}] 📅 Friday — signal logged for validation only, no webhook to Option Alpha.")
+            webhook = {'success': True, 'skipped': True, 'friday': True}
+        elif _daily_signal_cache['webhook_sent']:
             # Already sent today — log only, no webhook
             webhook_skipped = True
             prior = _daily_signal_cache['signal']
@@ -756,18 +765,33 @@ def test_slack():
 # ============================================================================
 
 def poke_self():
-    """Background thread: Trigger analysis every 20 minutes during trading hours.
+    """Background thread: Trigger analysis during trading hours.
     Not started when IS_LOCAL so one manual click = one run when testing.
+
+    First trigger of each day is randomized between 1:30-1:39 PM ET
+    (uniform distribution) to avoid predictable execution patterns.
+    Follow-up triggers at :50 and :10 remain fixed as fallbacks.
     """
     print("[POKE] Background thread started")
     # Use same host/port as the app so it works when PORT is overridden (e.g. Railway)
     base_url = os.environ.get("POKE_BASE_URL", "http://localhost:8080")
     timeout_sec = int(os.environ.get("POKE_TIMEOUT", "300"))  # 5 min; GPT can be slow
 
+    # Per-day randomized first-poke minute (set fresh each trading day)
+    _poke_date = None
+    _first_poke_minute = 30  # default, overwritten each day
+
     while True:
         try:
             now = datetime.now(ET_TZ)
             current_time = now.time()
+            today_str = now.strftime('%Y-%m-%d')
+
+            # Pick a random first-poke minute for each new day (1:30–1:39 PM)
+            if _poke_date != today_str:
+                _poke_date = today_str
+                _first_poke_minute = random.randint(30, 39)
+                print(f"[POKE] Today's first trigger scheduled for 1:{_first_poke_minute:02d} PM ET")
 
             # Reset alert dedup at midnight
             if current_time.hour == 0 and current_time.minute == 0 and current_time.second < 30:
@@ -775,7 +799,8 @@ def poke_self():
 
             if is_within_trading_window(now):
                 record_poke()
-                if current_time.minute in [30, 50, 10] and current_time.second < 30:
+                # First poke: randomized minute; follow-ups at :50 and :10
+                if current_time.minute in [_first_poke_minute, 50, 10] and current_time.second < 30:
                     print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
                     try:
                         requests.get(f"{base_url}/option_alpha_trigger", timeout=timeout_sec)

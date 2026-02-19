@@ -16,6 +16,7 @@ Usage:
   python backtest.py --gpt-score 6               # assume elevated GPT score
   python backtest.py --start 2025-06-01 --end 2025-12-31  # specific range
   python backtest.py --sweep                     # test GPT scores 2-8
+  python backtest.py --trade-days Mon,Tue,Wed,Thu # skip Fridays
 """
 import argparse
 import math
@@ -120,17 +121,44 @@ def _stub_gpt(score: int) -> dict:
     }
 
 
+WEEKDAY_MAP = {
+    'mon': 0, 'monday': 0,
+    'tue': 1, 'tuesday': 1,
+    'wed': 2, 'wednesday': 2,
+    'thu': 3, 'thursday': 3,
+    'fri': 4, 'friday': 4,
+}
+
+
+def parse_trade_days(spec: str) -> set:
+    """Parse a comma-separated weekday spec like 'Mon,Tue,Wed,Thu' into a set of ints (0=Mon..4=Fri)."""
+    days = set()
+    for token in spec.split(','):
+        token = token.strip().lower()
+        if token in WEEKDAY_MAP:
+            days.add(WEEKDAY_MAP[token])
+        else:
+            raise ValueError(f"Unknown weekday: '{token}'. Use Mon,Tue,Wed,Thu,Fri")
+    return days
+
+
 def run_backtest(
     start_date: str,
     end_date: str,
     gpt_score: int = 4,
     api_key: str = '',
     verbose: bool = False,
+    trade_days: Optional[set] = None,
 ) -> List[dict]:
     """Run backtest over a date range.
 
+    Args:
+        trade_days: Set of weekday ints to trade on (0=Mon..4=Fri). None = all weekdays.
+
     Returns list of daily result dicts.
     """
+    if trade_days is None:
+        trade_days = {0, 1, 2, 3, 4}  # Mon-Fri
     # Fetch extra days before start to have 25-day lookback for RV calc
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
     fetch_start = (start_dt - timedelta(days=50)).strftime('%Y-%m-%d')
@@ -175,14 +203,25 @@ def run_backtest(
     results = []
     gpt_stub = _stub_gpt(gpt_score)
 
+    day_names = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri'}
+    trade_days_label = ','.join(day_names[d] for d in sorted(trade_days))
+
     print(f"\nRunning backtest: {all_spx_dates[bt_start_idx]} → {all_spx_dates[bt_end_idx]}")
     print(f"GPT score stubbed at: {gpt_score}")
+    print(f"Trade days: {trade_days_label}")
     print(f"Days to simulate: {bt_end_idx - bt_start_idx + 1}")
     print("-" * 80)
 
     for idx in range(bt_start_idx, bt_end_idx + 1):
         date = all_spx_dates[idx]
         bar = spx_map[date]
+
+        # Skip days not in the trading weekday set
+        date_dt = datetime.strptime(date, '%Y-%m-%d')
+        if date_dt.weekday() not in trade_days:
+            if verbose:
+                print(f"  {date}: {day_names.get(date_dt.weekday(), '?')} — not a trade day, skipping")
+            continue
 
         # Build closes window (up to 25 days lookback)
         lookback_start = max(0, idx - 24)
@@ -373,7 +412,8 @@ def print_backtest_report(results: List[dict], gpt_score: int):
     print("\n" + "=" * 70)
 
 
-def run_gpt_sweep(start_date: str, end_date: str, api_key: str, verbose: bool = False):
+def run_gpt_sweep(start_date: str, end_date: str, api_key: str, verbose: bool = False,
+                   trade_days: Optional[set] = None):
     """Sweep GPT scores 2-8 and compare accuracy."""
     print("\n" + "=" * 70)
     print("  GPT SCORE SWEEP")
@@ -383,7 +423,8 @@ def run_gpt_sweep(start_date: str, end_date: str, api_key: str, verbose: bool = 
     sweep_results = {}
     for gpt in range(2, 9):
         print(f"\n--- GPT={gpt} ---")
-        results = run_backtest(start_date, end_date, gpt_score=gpt, api_key=api_key, verbose=False)
+        results = run_backtest(start_date, end_date, gpt_score=gpt, api_key=api_key,
+                               verbose=False, trade_days=trade_days)
         with_outcome = [r for r in results if r['outcome'] is not None]
 
         if not with_outcome:
@@ -424,6 +465,8 @@ def main():
     parser.add_argument('--end', type=str, help='End date YYYY-MM-DD (default: today)')
     parser.add_argument('--gpt-score', type=int, default=4, help='Fixed GPT score to stub (default: 4)')
     parser.add_argument('--sweep', action='store_true', help='Sweep GPT scores 2-8 and compare')
+    parser.add_argument('--trade-days', type=str, default='Mon,Tue,Wed,Thu,Fri',
+                        help='Comma-separated weekdays to trade on (default: Mon,Tue,Wed,Thu,Fri)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Print each day')
     args = parser.parse_args()
 
@@ -431,6 +474,13 @@ def main():
     api_key = config.get('POLYGON_API_KEY')
     if not api_key:
         print("ERROR: POLYGON_API_KEY not configured")
+        sys.exit(1)
+
+    # Parse trade days
+    try:
+        trade_days = parse_trade_days(args.trade_days)
+    except ValueError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
     # Determine date range
@@ -448,13 +498,14 @@ def main():
         start_date = start_dt.strftime('%Y-%m-%d')
 
     if args.sweep:
-        run_gpt_sweep(start_date, end_date, api_key, verbose=args.verbose)
+        run_gpt_sweep(start_date, end_date, api_key, verbose=args.verbose, trade_days=trade_days)
     else:
         results = run_backtest(
             start_date, end_date,
             gpt_score=args.gpt_score,
             api_key=api_key,
             verbose=args.verbose,
+            trade_days=trade_days,
         )
         print_backtest_report(results, args.gpt_score)
 

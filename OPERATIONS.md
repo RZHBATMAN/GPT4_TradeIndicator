@@ -113,11 +113,11 @@ Check Railway deploy logs to verify the system is healthy:
 
 - Poke thread is firing during trading hours
 - Polygon data fetches are succeeding
-- MiniMax API calls are returning valid responses
+- OpenAI API calls are returning valid responses
 - Webhooks are landing successfully
 - Confirmation pass results (do the two passes agree?)
 
-If you set up Slack alerting, you'll get automatic notifications for failures. But manual log checks are still useful for spotting patterns (e.g., MiniMax consistently timing out).
+If you set up Slack alerting, you'll get automatic notifications for failures. But manual log checks are still useful for spotting patterns (e.g., OpenAI consistently timing out).
 
 ---
 
@@ -140,4 +140,4 @@ Open your signal log Sheet and scan for:
 - **Contradiction_Flags column:** How often are contradictions firing? If it's every day, thresholds may be too aggressive.
 - **Override_Applied column:** How often is SKIP being forced by the GPT >= 8 rule?
 - **Outcome_Correct column:** After running validate_outcomes.py, check win/loss distribution by tier.
-- **GPT_Score column:** Is MiniMax consistently scoring high or low? If it's always 3-4, it may not be adding value.
+- **GPT_Score column:** Is GPT consistently scoring high or low? If it's always 3-4, it may not be adding value.

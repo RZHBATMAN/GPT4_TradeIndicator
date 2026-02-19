@@ -35,7 +35,7 @@ Currently trend scoring is symmetric: +4% and -4% both score 7. This treats rall
 
 ### Think about: Reducing GPT weight from 50% to 40%
 
-GPT is 50% of the composite. If MiniMax has a bad day, half your signal is compromised. The quantitative factors (IV/RV, Trend) are deterministic and reproducible.
+GPT is 50% of the composite. If OpenAI has a bad day, half your signal is compromised. The quantitative factors (IV/RV, Trend) are deterministic and reproducible.
 
 **What to do:**
 - Run `validate_outcomes.py` for 1-2 months

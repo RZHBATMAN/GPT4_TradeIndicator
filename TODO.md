@@ -4,19 +4,6 @@ Things to think about, decide on, or act on. These are not operational "run this
 
 ---
 
-## Setup Tasks
-
-### Set up Slack alerting webhook
-The alerting system is built and integrated but needs a webhook URL to actually send notifications.
-
-**Steps:**
-1. Go to Slack > Apps > Incoming Webhooks
-2. Create a new webhook for your desired channel
-3. Add to Railway env var: `ALERT_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL`
-4. Or add to `.config` under `[WEBHOOKS]`: `ALERT_WEBHOOK_URL = https://hooks.slack.com/services/...`
-
----
-
 ## Decisions To Make (After Collecting Data)
 
 ### Think about: Trend scoring asymmetry
@@ -106,3 +93,4 @@ OA backtests show the base iron condor strategy (no signal, just selling every d
 - ~~Web UI update~~ — reflects all new features and safety layers
 - ~~Fix webhook whiplash~~ — confirmation pass before webhook, once-per-day send
 - ~~Restructure docs~~ — README.md (architecture), TODO.md (decisions), OPERATIONS.md (runbook)
+- ~~Set up Slack alerting webhook~~ — incoming webhook configured and tested

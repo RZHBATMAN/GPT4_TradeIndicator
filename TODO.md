@@ -63,6 +63,17 @@ Weekend exposure is ~64 hours vs the usual ~16 hours overnight. If Friday signal
 
 ---
 
+### Think about: Paper vs live execution quality
+
+Running paper and live OA bots in parallel with the same recipe. After 1 month, compare fill quality and slippage (see [OPERATIONS.md](OPERATIONS.md) "Compare Paper vs Live" section).
+
+**What to decide:**
+- Is OA's execution quality acceptable? (slippage < 5% of premium = good)
+- Are there specific market conditions where live fills are significantly worse? (e.g., high VIX days, end of day)
+- If execution is consistently poor → investigate alternative brokers or direct broker API
+
+---
+
 ### Think about: Exit strategy tuning based on OA backtests
 
 OA backtests show the base iron condor strategy (no signal, just selling every day) performs differently depending on exit rules. Key observations:

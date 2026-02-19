@@ -8,9 +8,10 @@ Regular operational tasks for keeping the signal system running and validated. T
 
 These happen on Railway without any intervention:
 
-- **Signal generation:** Poke thread triggers every 20 min during Mon-Fri 1:30-2:30 PM ET
-- **Webhook dispatch:** Fires to Option Alpha after the first signal each day
-- **Sheets logging:** Appends a row to Google Sheets after every signal
+- **Signal generation:** Poke thread triggers at a random time between 1:30-1:39 PM ET, then at :50 and :10 as fallbacks
+- **Webhook dispatch:** Fires to Option Alpha after the first signal each day (Mon-Thu only; Fridays are log-only)
+- **Sheets logging:** Appends a row to Google Sheets after every signal (all days including Friday)
+- **Trade_Executed tracking:** Logs whether a trade was actually placed (YES) or blocked (NO_SKIP, NO_FRIDAY, NO_VIX_GATE, NO_OA_EVENT)
 - **Contradiction detection:** Runs automatically as part of signal pipeline
 - **Earnings calendar check:** Queries Polygon for Mag 7 earnings before each signal
 - **Confirmation pass:** Runs analysis twice, picks conservative result
@@ -124,6 +125,24 @@ The file `data/oa_event_calendar.py` contains static date sets for FOMC meetings
 3. Add the new year's NYSE early close dates to `EARLY_CLOSE_DATES` (typically: day before July 4, Black Friday, Christmas Eve)
 
 **If you forget:** The calendar won't detect event gates for dates it doesn't know about. Trades will still fire on FOMC/CPI days, but `Trade_Executed` will say `YES` instead of `NO_OA_EVENT` — so the Sheet log won't accurately reflect what OA actually did. The trades themselves are still gated by OA's own recipe, so no real harm, just inaccurate logging.
+
+---
+
+## First Month of Live Trading: Compare Paper vs Live
+
+Run both paper and live OA bots with the **exact same recipe** side by side. The webhook fires once — both bots receive it. After 1 month, compare the two to measure your real execution cost.
+
+**What to compare:**
+- **Fill quality:** For each trade, compare the premium collected on paper vs live. Paper assumes mid-price fills; live shows what you actually got.
+- **Slippage per trade:** `(paper_premium - live_premium) / paper_premium`. This is the "execution tax."
+- **Win/loss agreement:** Do paper and live agree on which trades survived? If paper shows a win but live shows a loss (or vice versa), the fill difference was large enough to flip the outcome — that's a red flag.
+
+**What the results mean:**
+- Slippage consistently < 5% of premium → execution is fine, OA is working well
+- Slippage consistently 10-20% → worth investigating OA's order routing or timing
+- Paper and live disagree on wins/losses → the fill difference is eating into your edge, consider execution alternatives (different broker, different order type, or direct broker API in the future)
+
+**Where to check:** OA's position history / trade log for both paper and live bots.
 
 ---
 

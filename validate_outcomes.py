@@ -226,6 +226,8 @@ def _evaluate_outcome(
             outcome = "CORRECT_VIX_GATE" if correct else "WRONG_VIX_GATE"
         elif trade_executed == 'NO_FRIDAY':
             outcome = "CORRECT_FRIDAY" if correct else "WRONG_FRIDAY"
+        elif trade_executed.startswith('NO_OA_EVENT'):
+            outcome = "CORRECT_OA_EVENT" if correct else "WRONG_OA_EVENT"
         else:
             # NO_DUPLICATE or unknown
             outcome = "CORRECT_NO_TRADE" if correct else "WRONG_NO_TRADE"
@@ -469,13 +471,18 @@ def print_accuracy_report(results: Optional[List[Dict]] = None):
         skip_reasons = {}
         for o in not_traded:
             te = o['trade_executed']
-            # Normalize VIX gate entries
-            reason = 'NO_VIX_GATE' if te.startswith('NO_VIX_GATE') else te
+            # Normalize entries with details in parentheses
+            if te.startswith('NO_VIX_GATE'):
+                reason = 'NO_VIX_GATE'
+            elif te.startswith('NO_OA_EVENT'):
+                reason = 'NO_OA_EVENT'
+            else:
+                reason = te
             if reason not in skip_reasons:
                 skip_reasons[reason] = []
             skip_reasons[reason].append(o)
 
-        for reason in ['NO_SKIP', 'NO_FRIDAY', 'NO_VIX_GATE', 'NO_DUPLICATE']:
+        for reason in ['NO_SKIP', 'NO_FRIDAY', 'NO_VIX_GATE', 'NO_OA_EVENT', 'NO_DUPLICATE']:
             entries = skip_reasons.get(reason, [])
             if not entries:
                 continue
@@ -487,6 +494,7 @@ def print_accuracy_report(results: Optional[List[Dict]] = None):
                 'NO_SKIP': 'Signal SKIP',
                 'NO_FRIDAY': 'Friday (no trade)',
                 'NO_VIX_GATE': 'OA VIX gate (>=25)',
+                'NO_OA_EVENT': 'OA event gate (FOMC/CPI/early close)',
                 'NO_DUPLICATE': 'Duplicate webhook',
             }.get(reason, reason)
 

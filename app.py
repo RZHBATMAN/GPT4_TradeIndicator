@@ -25,6 +25,7 @@ from signal_engine import run_signal_analysis
 from webhooks import send_webhook
 from sheets_logger import log_signal as log_signal_to_sheets
 from alerting import record_signal_success, record_api_failure, record_poke, check_end_of_window, reset_daily, get_alert_status
+from data.oa_event_calendar import check_oa_event_gates, format_gate_reasons
 
 app = Flask(__name__)
 
@@ -514,6 +515,7 @@ def option_alpha_trigger():
         is_friday = now.weekday() == 4
         vix_current = iv_rv.get('vix_30d')
         vix_blocked = vix_current is not None and vix_current >= OA_VIX_GATE
+        oa_event_gates = check_oa_event_gates(now)
 
         if is_friday:
             # Friday: log signal to Sheets for validation, but do NOT send webhook
@@ -537,12 +539,15 @@ def option_alpha_trigger():
             _daily_signal_cache['score'] = composite['score']
             print(f"[{timestamp}] Webhook fired: {signal['signal']}")
 
-            # Determine actual trade execution status
+            # Determine actual trade execution status — check all OA gates
             if signal['signal'] == 'SKIP':
                 trade_executed = "NO_SKIP"
             elif vix_blocked:
                 trade_executed = f"NO_VIX_GATE (VIX={vix_current:.1f})"
                 print(f"[{timestamp}] VIX={vix_current:.1f} >= {OA_VIX_GATE} — OA will block this trade")
+            elif oa_event_gates:
+                trade_executed = f"NO_OA_EVENT ({format_gate_reasons(oa_event_gates)})"
+                print(f"[{timestamp}] OA event gate active: {format_gate_reasons(oa_event_gates)}")
             else:
                 trade_executed = "YES"
 

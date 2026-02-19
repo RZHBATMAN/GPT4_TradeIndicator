@@ -38,6 +38,15 @@ FOMC_DATES = {
     '2026-09-15', '2026-09-16',
     '2026-10-27', '2026-10-28',
     '2026-12-08', '2026-12-09',
+    # 2027 (official tentative schedule, announced Sep 2025)
+    '2027-01-26', '2027-01-27',
+    '2027-03-16', '2027-03-17',
+    '2027-04-27', '2027-04-28',
+    '2027-06-08', '2027-06-09',
+    '2027-07-27', '2027-07-28',
+    '2027-09-14', '2027-09-15',
+    '2027-10-26', '2027-10-27',
+    '2027-12-07', '2027-12-08',
 }
 
 # ── CPI release dates (8:30 AM ET) ──
@@ -51,11 +60,18 @@ CPI_DATES = {
     '2026-01-13', '2026-02-11', '2026-03-11', '2026-04-14',
     '2026-05-12', '2026-06-10', '2026-07-14', '2026-08-12',
     '2026-09-16', '2026-10-13', '2026-11-10', '2026-12-09',
+    # 2027 (ESTIMATED — BLS has not published 2027 schedule yet as of Feb 2026.
+    #        Based on historical pattern: ~2nd week of each month, Tue/Wed.
+    #        Replace with official dates when BLS publishes them.)
+    '2027-01-12', '2027-02-10', '2027-03-10', '2027-04-13',
+    '2027-05-12', '2027-06-09', '2027-07-13', '2027-08-11',
+    '2027-09-14', '2027-10-13', '2027-11-10', '2027-12-08',
 }
 
 # ── NYSE early close dates (1:00 PM ET instead of 4:00 PM) ──
 # Typically: day before Independence Day, Black Friday, Christmas Eve
 # Source: https://www.nyse.com/markets/hours-calendars
+# Note: Not every year has all three. Check the official NYSE calendar.
 EARLY_CLOSE_DATES = {
     # 2025
     '2025-07-03',   # Day before July 4
@@ -65,6 +81,10 @@ EARLY_CLOSE_DATES = {
     '2026-07-02',   # Day before observed July 4 (July 3 = holiday since July 4 is Sat)
     '2026-11-27',   # Black Friday
     '2026-12-24',   # Christmas Eve
+    # 2027 (official — only 1 early close this year)
+    # July 4 falls on Sunday (observed Mon Jul 5 = closed; Jul 3 = Saturday → no early close)
+    # Dec 24 falls on Friday = observed Christmas holiday (full closure, not early close)
+    '2027-11-26',   # Black Friday
 }
 
 

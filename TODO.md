@@ -61,6 +61,21 @@ The trading window is only 1 hour. With 15-min delayed data, at 2:00 PM you're s
 
 ---
 
+### Think about: Friday signal accuracy vs other days
+
+Weekend exposure is ~64 hours vs the usual ~16 hours overnight. If Friday signals have a significantly higher WRONG_TRADE rate, consider adding a configurable Friday modifier (e.g., +1.5 to composite score on Fridays, biasing toward SKIP or CONSERVATIVE).
+
+**What to do:**
+- After 1-2 months of data, run `validate_outcomes.py --report`
+- Filter outcome data for Friday signals vs Mon-Thu signals
+- Compare WRONG_TRADE rates and average overnight move magnitudes
+- If Friday is meaningfully worse → add a `FRIDAY_SCORE_MODIFIER` to `signal_engine.py`
+- If Friday is comparable → leave as-is
+
+**File:** `signal_engine.py`
+
+---
+
 ### Think about: Exit strategy tuning based on OA backtests
 
 OA backtests show the base iron condor strategy (no signal, just selling every day) performs differently depending on exit rules. Key observations:

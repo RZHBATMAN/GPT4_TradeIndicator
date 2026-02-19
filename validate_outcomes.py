@@ -73,65 +73,91 @@ COL_OVERNIGHT_MOVE = 25
 COL_OUTCOME_CORRECT = 26
 
 
+def _parse_signal_date(date_str: str) -> Optional[datetime]:
+    """Parse a timestamp string from the sheet into a datetime."""
+    for fmt in [
+        "%Y-%m-%d %I:%M:%S %p %Z",
+        "%Y-%m-%d %I:%M:%S %p ET",
+        "%Y-%m-%d %I:%M:%S %p EST",
+        "%Y-%m-%d %I:%M:%S %p EDT",
+        "%Y-%m-%d",
+    ]:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+    # Last resort: dateutil
+    try:
+        from dateutil import parser as dp
+        return dp.parse(date_str.strip())
+    except Exception:
+        return None
+
+
+def _next_weekday(dt: datetime) -> datetime:
+    """Advance a datetime to the next weekday (skip weekends)."""
+    next_day = dt + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day
+
+
 def _get_next_trading_day(date_str: str) -> str:
     """Given a date string from the sheet, return the next trading day (skip weekends)."""
     try:
-        # Parse various timestamp formats
-        for fmt in [
-            "%Y-%m-%d %I:%M:%S %p %Z",
-            "%Y-%m-%d %I:%M:%S %p ET",
-            "%Y-%m-%d %I:%M:%S %p EST",
-            "%Y-%m-%d %I:%M:%S %p EDT",
-            "%Y-%m-%d",
-        ]:
-            try:
-                dt = datetime.strptime(date_str.strip(), fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            # Last resort: dateutil
-            from dateutil import parser as dp
-            dt = dp.parse(date_str.strip())
-
-        next_day = dt + timedelta(days=1)
-        # Skip weekends
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        return next_day.strftime('%Y-%m-%d')
+        dt = _parse_signal_date(date_str)
+        if dt is None:
+            logger.warning("Could not parse date '%s'", date_str)
+            return ""
+        return _next_weekday(dt).strftime('%Y-%m-%d')
     except Exception as e:
         logger.warning("Could not parse date '%s': %s", date_str, e)
         return ""
 
 
-def _fetch_spx_day(date_str: str, api_key: str) -> Optional[Dict[str, float]]:
-    """Fetch SPX open and close for a specific date from Polygon."""
-    try:
-        url = (
-            f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/"
-            f"{date_str}/{date_str}?adjusted=true&sort=asc&limit=1&apiKey={api_key}"
-        )
-        resp = requests.get(url, timeout=15)
-        if resp.status_code != 200:
-            print(f"  [Polygon] HTTP {resp.status_code} for {date_str}")
+def _fetch_spx_day(date_str: str, api_key: str, max_holiday_retries: int = 5
+                    ) -> Optional[Tuple[Dict[str, float], str]]:
+    """Fetch SPX open and close for a specific date from Polygon.
+
+    If no data is returned (market holiday), advances to the next weekday and
+    retries up to ``max_holiday_retries`` times.
+
+    Returns (bar_dict, actual_date_str) or None.
+    """
+    current_date = datetime.strptime(date_str, '%Y-%m-%d')
+
+    for attempt in range(max_holiday_retries + 1):
+        ds = current_date.strftime('%Y-%m-%d')
+        try:
+            url = (
+                f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/day/"
+                f"{ds}/{ds}?adjusted=true&sort=asc&limit=1&apiKey={api_key}"
+            )
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                print(f"  [Polygon] HTTP {resp.status_code} for {ds}")
+                return None
+
+            data = resp.json()
+            results = data.get('results', [])
+            if not results:
+                print(f"  [Polygon] No data for {ds} (holiday?), trying next weekday...")
+                current_date = _next_weekday(current_date)
+                continue
+
+            bar = results[0]
+            return {
+                'open': bar.get('o'),
+                'close': bar.get('c'),
+                'high': bar.get('h'),
+                'low': bar.get('l'),
+            }, ds
+        except Exception as e:
+            print(f"  [Polygon] Error fetching {ds}: {e}")
             return None
 
-        data = resp.json()
-        results = data.get('results', [])
-        if not results:
-            print(f"  [Polygon] No data for {date_str} (holiday?)")
-            return None
-
-        bar = results[0]
-        return {
-            'open': bar.get('o'),
-            'close': bar.get('c'),
-            'high': bar.get('h'),
-            'low': bar.get('l'),
-        }
-    except Exception as e:
-        print(f"  [Polygon] Error fetching {date_str}: {e}")
-        return None
+    print(f"  [Polygon] No data found after {max_holiday_retries} retries from {date_str}")
+    return None
 
 
 def _evaluate_outcome(
@@ -251,9 +277,13 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
 
         print(f"  Row {row_idx + 1}: {timestamp} | Signal={signal} | SPX={spx_entry:.2f} | Next day={next_day}")
 
-        day_data = _fetch_spx_day(next_day, api_key)
-        if day_data is None:
+        fetch_result = _fetch_spx_day(next_day, api_key)
+        if fetch_result is None:
             continue
+
+        day_data, actual_date = fetch_result
+        if actual_date != next_day:
+            print(f"           (holiday skip: {next_day} → {actual_date})")
 
         spx_next_open = day_data['open']
         spx_next_close = day_data['close']

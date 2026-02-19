@@ -45,6 +45,9 @@ IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
 # Signal consistency: track whether we've already sent a webhook today.
 # Once a webhook fires, Option Alpha creates a label and places a trade.
 # Subsequent pokes within the same day are logged but do NOT fire webhooks.
+# Option Alpha VIX gate: OA will not open positions when VIX >= this value
+OA_VIX_GATE = 25
+
 _daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None}
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
@@ -509,18 +512,22 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Reason: {signal['reason']}")
 
         is_friday = now.weekday() == 4
+        vix_current = iv_rv.get('vix_30d')
+        vix_blocked = vix_current is not None and vix_current >= OA_VIX_GATE
 
         if is_friday:
             # Friday: log signal to Sheets for validation, but do NOT send webhook
             # (no live trades on Fridays — weekend theta decay risk)
             webhook_skipped = True
-            print(f"[{timestamp}] 📅 Friday — signal logged for validation only, no webhook to Option Alpha.")
+            trade_executed = "NO_FRIDAY"
+            print(f"[{timestamp}] Friday — signal logged for validation only, no webhook to Option Alpha.")
             webhook = {'success': True, 'skipped': True, 'friday': True}
         elif _daily_signal_cache['webhook_sent']:
             # Already sent today — log only, no webhook
             webhook_skipped = True
+            trade_executed = "NO_DUPLICATE"
             prior = _daily_signal_cache['signal']
-            print(f"[{timestamp}] ⚠️  Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
+            print(f"[{timestamp}] Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
             webhook = {'success': True, 'skipped': True}
         else:
             # First signal of the day — fire webhook
@@ -529,6 +536,17 @@ def option_alpha_trigger():
             _daily_signal_cache['signal'] = signal['signal']
             _daily_signal_cache['score'] = composite['score']
             print(f"[{timestamp}] Webhook fired: {signal['signal']}")
+
+            # Determine actual trade execution status
+            if signal['signal'] == 'SKIP':
+                trade_executed = "NO_SKIP"
+            elif vix_blocked:
+                trade_executed = f"NO_VIX_GATE (VIX={vix_current:.1f})"
+                print(f"[{timestamp}] VIX={vix_current:.1f} >= {OA_VIX_GATE} — OA will block this trade")
+            else:
+                trade_executed = "YES"
+
+        print(f"[{timestamp}] Trade Executed: {trade_executed}")
         print(f"[{timestamp}] ======================================\n")
 
         # Log contradiction detection
@@ -555,6 +573,8 @@ def option_alpha_trigger():
             filter_stats=news_data.get("filter_stats", {}),
             webhook_success=webhook.get("success", False),
             contradictions=contradictions,
+            vix_current=vix_current,
+            trade_executed=trade_executed,
         )
 
         # Record successful signal for alerting

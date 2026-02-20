@@ -185,6 +185,17 @@ Open your signal log Sheet and scan for:
 
 ## Scaling Path: From Test to Income
 
+### Why This Strategy Has No Ceiling
+
+Most trading strategies break when you add size. Market impact eats your fills, your edge disappears, and what worked at 1 contract fails at 10. SPX 0DTE credit spreads are different:
+
+1. **SPX liquidity is effectively infinite.** SPX options are the most liquid derivatives market in the world. 50 contracts is invisible. 500 contracts barely registers. Your strategy will never move the market — the ceiling is your capital, not the instrument.
+2. **The edge is structural, not informational.** You're not competing on speed or alpha discovery. The overnight variance risk premium — the tendency for realized overnight moves to be smaller than implied — is a persistent feature of how options are priced. Market makers charge a premium for overnight risk; you collect that premium. This doesn't get arbitraged away because someone has to hold the risk.
+3. **The system is mechanical.** Signals fire automatically. Trades execute automatically. Exits are rule-based. This means scaling doesn't require more of your time or attention. 1 contract and 20 contracts take the same effort: zero.
+4. **Small wins compound into serious money.** At 1 contract, a 30% profit target on a $2.00 credit spread is $60. At 20 contracts, it's $1,200. Same signal, same edge, same effort. The only difference is capital and the courage to deploy it — which is why you earn that courage through data, not hope.
+
+**The bottleneck is never the strategy. It's your emotional discipline at size.** That's why the phases below exist — each one builds the psychological evidence that the system works, so that when you're running 20 contracts and you see a $2,000 loss night, you don't panic and override the system. You've seen the data. You know the win rate. You stay in.
+
 A disciplined, data-driven path from initial testing to income generation. **Do not skip phases.** Each phase has a gate — only advance when the data supports it.
 
 ### Phase 1: Test (Weeks 1–8)

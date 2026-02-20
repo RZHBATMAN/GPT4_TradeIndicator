@@ -4,19 +4,6 @@ Things to think about, decide on, or act on. These are not operational "run this
 
 ---
 
-## Setup Tasks
-
-### Set up Slack alerting webhook
-The alerting system is built and integrated but needs a webhook URL to actually send notifications.
-
-**Steps:**
-1. Go to Slack > Apps > Incoming Webhooks
-2. Create a new webhook for your desired channel
-3. Add to Railway env var: `ALERT_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL`
-4. Or add to `.config` under `[WEBHOOKS]`: `ALERT_WEBHOOK_URL = https://hooks.slack.com/services/...`
-
----
-
 ## Decisions To Make (After Collecting Data)
 
 ### Think about: Trend scoring asymmetry
@@ -78,16 +65,49 @@ Weekend exposure is ~64 hours vs the usual ~16 hours overnight. If Friday signal
 
 ### Think about: Exit strategy tuning based on OA backtests
 
-OA backtests show the base iron condor strategy (no signal, just selling every day) performs differently depending on exit rules. Key observations:
+Weekend exposure is ~64 hours vs the usual ~16 hours overnight. If Friday signals have a significantly higher WRONG_TRADE rate, consider adding a configurable Friday modifier (e.g., +1.5 to composite score on Fridays, biasing toward SKIP or CONSERVATIVE).
 
-- **Take-profit exits matter:** Capturing a fixed % of max profit early (e.g., 50-75%) rather than holding to expiration reduces tail risk. Holding to 10 AM next day is a good balance between theta capture and avoiding morning gap continuation.
-- **Stop-loss impact:** Adding a stop-loss vs not having one changes the P&L distribution significantly. No stop-loss means larger max drawdowns but higher overall win rate. Stop-loss protects capital but can trigger on intraday whipsaws before the overnight move actually plays out.
-- **Time-based exit at 10 AM:** Good for capturing overnight premium while avoiding intraday noise the next morning.
+**What to do:**
+- After 1-2 months of data, run `validate_outcomes.py --report`
+- Filter outcome data for Friday signals vs Mon-Thu signals
+- Compare WRONG_TRADE rates and average overnight move magnitudes
+- If Friday is meaningfully worse → add a `FRIDAY_SCORE_MODIFIER` to `signal_engine.py`
+- If Friday is comparable → leave as-is
+
+**File:** `signal_engine.py`
+
+---
+
+### Think about: Paper vs live execution quality
+
+Running paper and live OA bots in parallel with the same recipe. After 1 month, compare fill quality and slippage (see [OPERATIONS.md](OPERATIONS.md) "Compare Paper vs Live" section).
 
 **What to decide:**
-- Should the signal tier ALSO influence exit parameters? (e.g., AGGRESSIVE signals use tighter take-profit since conditions are ideal, CONSERVATIVE signals use wider stop-loss since more risk)
-- Should different tiers use different time-based exits? (e.g., AGGRESSIVE holds longer for more premium, CONSERVATIVE exits earlier)
-- This would require more granular Option Alpha automation configuration — possibly separate OA bots per tier with different exit rules
+- Is OA's execution quality acceptable? (slippage < 5% of premium = good)
+- Are there specific market conditions where live fills are significantly worse? (e.g., high VIX days, end of day)
+- If execution is consistently poor → investigate alternative brokers or direct broker API
+
+---
+
+### IN PROGRESS: Exit strategy tuning — parallel bot experiment
+
+Running two OA bots (paper + live each) side by side to test different exit settings. Both receive the same signal webhooks. See [OPERATIONS.md](OPERATIONS.md) "Scaling Path" section for the full experimental design.
+
+| Bot | Profit Targets | Stop Losses | Touch Monitor |
+|---|---|---|---|
+| Original | Aggressive 15% / Normal 20% / Conservative 40% | 75% / 100% / 150% | $40 ITM, 80% max loss |
+| Test | Aggressive 30% / Normal 30% / Conservative 40% | 75% / 100% / 130% | $15 ITM, 65% max loss |
+
+**Hypothesis:** The original bot is too conservative on wins (small profit targets) and too loose on Conservative losses (wide stop). The test bot captures more on winning nights and cuts losers faster.
+
+**What to compare after 30–40 trades:**
+- Total P&L per bot per tier
+- Win rate per tier (did wider profit targets reduce win rate?)
+- Average win $ vs average loss $ per tier
+- Max drawdown
+- Break-even win rate: Original Aggressive/Normal need 83.3%, Test needs 71.4%/76.9%/76.5%
+
+**Decision:** Pick the winner, kill the loser, then proceed with the scaling path.
 
 ---
 
@@ -106,3 +126,7 @@ OA backtests show the base iron condor strategy (no signal, just selling every d
 - ~~Web UI update~~ — reflects all new features and safety layers
 - ~~Fix webhook whiplash~~ — confirmation pass before webhook, once-per-day send
 - ~~Restructure docs~~ — README.md (architecture), TODO.md (decisions), OPERATIONS.md (runbook)
+- ~~Set up Slack alerting webhook~~ — incoming webhook configured and tested
+- ~~Validation uses 10 AM exit price~~ — matches OA time-based exit instead of 9:30 AM open
+- ~~Document OA exit parameters~~ — profit/stop/touch/time exit settings as code constants
+- ~~Scaling path documented~~ — 4-phase roadmap in OPERATIONS.md (Test → Validate → Scale → Full)

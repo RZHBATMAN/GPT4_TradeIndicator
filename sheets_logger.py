@@ -30,6 +30,8 @@ SHEET_HEADERS = [
     "GPT_Key_Risk",
     "Webhook_Success",
     "SPX_Current",
+    "VIX",
+    "Trade_Executed",
     "Raw_Articles",
     "Sent_To_GPT",
     "GPT_Reasoning",
@@ -38,6 +40,7 @@ SHEET_HEADERS = [
     "Override_Applied",
     "Score_Adjustment",
     # Outcome tracking columns (filled later by validate_outcomes.py)
+    # SPX_Next_Open = exit price: 10 AM ET minute data when available, else daily open
     "SPX_Next_Open",
     "SPX_Next_Close",
     "Overnight_Move_Pct",
@@ -128,6 +131,8 @@ def log_signal(
     filter_stats: Dict[str, Any],
     webhook_success: bool,
     contradictions: Optional[Dict[str, Any]] = None,
+    vix_current: Optional[float] = None,
+    trade_executed: str = "",
 ) -> None:
     """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
     print("[Sheets] log_signal called")
@@ -169,6 +174,8 @@ def log_signal(
             gpt.get("key_risk", ""),
             webhook_success,
             spx_current,
+            vix_current if vix_current is not None else "",
+            trade_executed,
             filter_stats.get("raw_articles", ""),
             filter_stats.get("sent_to_gpt", ""),
             reasoning,

@@ -13,6 +13,7 @@ import pytz
 import os
 import threading
 import time as time_module
+import random
 import requests
 
 # Import modular components
@@ -24,6 +25,7 @@ from signal_engine import run_signal_analysis
 from webhooks import send_webhook
 from sheets_logger import log_signal as log_signal_to_sheets
 from alerting import record_signal_success, record_api_failure, record_poke, check_end_of_window, reset_daily, get_alert_status
+from data.oa_event_calendar import check_oa_event_gates, format_gate_reasons
 
 app = Flask(__name__)
 
@@ -44,6 +46,9 @@ IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
 # Signal consistency: track whether we've already sent a webhook today.
 # Once a webhook fires, Option Alpha creates a label and places a trade.
 # Subsequent pokes within the same day are logged but do NOT fire webhooks.
+# Option Alpha VIX gate: OA will not open positions when VIX >= this value
+OA_VIX_GATE = 25
+
 _daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None}
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
@@ -507,11 +512,24 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
 
-        if _daily_signal_cache['webhook_sent']:
+        is_friday = now.weekday() == 4
+        vix_current = iv_rv.get('vix_30d')
+        vix_blocked = vix_current is not None and vix_current >= OA_VIX_GATE
+        oa_event_gates = check_oa_event_gates(now)
+
+        if is_friday:
+            # Friday: log signal to Sheets for validation, but do NOT send webhook
+            # (no live trades on Fridays — weekend theta decay risk)
+            webhook_skipped = True
+            trade_executed = "NO_FRIDAY"
+            print(f"[{timestamp}] Friday — signal logged for validation only, no webhook to Option Alpha.")
+            webhook = {'success': True, 'skipped': True, 'friday': True}
+        elif _daily_signal_cache['webhook_sent']:
             # Already sent today — log only, no webhook
             webhook_skipped = True
+            trade_executed = "NO_DUPLICATE"
             prior = _daily_signal_cache['signal']
-            print(f"[{timestamp}] ⚠️  Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
+            print(f"[{timestamp}] Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
             webhook = {'success': True, 'skipped': True}
         else:
             # First signal of the day — fire webhook
@@ -520,6 +538,20 @@ def option_alpha_trigger():
             _daily_signal_cache['signal'] = signal['signal']
             _daily_signal_cache['score'] = composite['score']
             print(f"[{timestamp}] Webhook fired: {signal['signal']}")
+
+            # Determine actual trade execution status — check all OA gates
+            if signal['signal'] == 'SKIP':
+                trade_executed = "NO_SKIP"
+            elif vix_blocked:
+                trade_executed = f"NO_VIX_GATE (VIX={vix_current:.1f})"
+                print(f"[{timestamp}] VIX={vix_current:.1f} >= {OA_VIX_GATE} — OA will block this trade")
+            elif oa_event_gates:
+                trade_executed = f"NO_OA_EVENT ({format_gate_reasons(oa_event_gates)})"
+                print(f"[{timestamp}] OA event gate active: {format_gate_reasons(oa_event_gates)}")
+            else:
+                trade_executed = "YES"
+
+        print(f"[{timestamp}] Trade Executed: {trade_executed}")
         print(f"[{timestamp}] ======================================\n")
 
         # Log contradiction detection
@@ -546,6 +578,8 @@ def option_alpha_trigger():
             filter_stats=news_data.get("filter_stats", {}),
             webhook_success=webhook.get("success", False),
             contradictions=contradictions,
+            vix_current=vix_current,
+            trade_executed=trade_executed,
         )
 
         # Record successful signal for alerting
@@ -756,18 +790,33 @@ def test_slack():
 # ============================================================================
 
 def poke_self():
-    """Background thread: Trigger analysis every 20 minutes during trading hours.
+    """Background thread: Trigger analysis during trading hours.
     Not started when IS_LOCAL so one manual click = one run when testing.
+
+    First trigger of each day is randomized between 1:30-1:39 PM ET
+    (uniform distribution) to avoid predictable execution patterns.
+    Follow-up triggers at :50 and :10 remain fixed as fallbacks.
     """
     print("[POKE] Background thread started")
     # Use same host/port as the app so it works when PORT is overridden (e.g. Railway)
     base_url = os.environ.get("POKE_BASE_URL", "http://localhost:8080")
     timeout_sec = int(os.environ.get("POKE_TIMEOUT", "300"))  # 5 min; GPT can be slow
 
+    # Per-day randomized first-poke minute (set fresh each trading day)
+    _poke_date = None
+    _first_poke_minute = 30  # default, overwritten each day
+
     while True:
         try:
             now = datetime.now(ET_TZ)
             current_time = now.time()
+            today_str = now.strftime('%Y-%m-%d')
+
+            # Pick a random first-poke minute for each new day (1:30–1:39 PM)
+            if _poke_date != today_str:
+                _poke_date = today_str
+                _first_poke_minute = random.randint(30, 39)
+                print(f"[POKE] Today's first trigger scheduled for 1:{_first_poke_minute:02d} PM ET")
 
             # Reset alert dedup at midnight
             if current_time.hour == 0 and current_time.minute == 0 and current_time.second < 30:
@@ -775,7 +824,8 @@ def poke_self():
 
             if is_within_trading_window(now):
                 record_poke()
-                if current_time.minute in [30, 50, 10] and current_time.second < 30:
+                # First poke: randomized minute; follow-ups at :50 and :10
+                if current_time.minute in [_first_poke_minute, 50, 10] and current_time.second < 30:
                     print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
                     try:
                         requests.get(f"{base_url}/option_alpha_trigger", timeout=timeout_sec)

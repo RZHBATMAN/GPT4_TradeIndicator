@@ -213,6 +213,18 @@ Each signal fires a distinct Option Alpha webhook URL. Option Alpha handles the 
 
 ## Project Structure
 
+## 📚 Technical Details
+
+### Threading Model
+
+- **Main Thread:** Runs Flask web server (blocking)
+- **Daemon Thread:** Runs poke scheduler (background)
+- **Communication:** Daemon thread → HTTP → Flask route
+
+### Why Daemon Thread?
+
+```python
+t.daemon = True
 ```
 GPT4_TradeIndicator/
 ├── app.py                      # Flask server, routes, poke scheduler

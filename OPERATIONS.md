@@ -104,7 +104,7 @@ Workflow for any code change:
 python -m pytest tests/test_signal_validation.py -v
 ```
 
-46 tests covering all indicator scoring, composite math, contradictions, alerting, and backtest helpers. Run this after modifying any signal logic to verify nothing broke.
+53 tests covering all indicator scoring, composite math, contradictions, alerting, backtest helpers, and outcome evaluation. Run this after modifying any signal logic to verify nothing broke.
 
 ---
 
@@ -180,3 +180,71 @@ Open your signal log Sheet and scan for:
 - **Override_Applied column:** How often is SKIP being forced by the GPT >= 8 rule?
 - **Outcome_Correct column:** After running validate_outcomes.py, check win/loss distribution by tier.
 - **GPT_Score column:** Is GPT consistently scoring high or low? If it's always 3-4, it may not be adding value.
+
+---
+
+## Scaling Path: From Test to Income
+
+A disciplined, data-driven path from initial testing to income generation. **Do not skip phases.** Each phase has a gate — only advance when the data supports it.
+
+### Phase 1: Test (Weeks 1–8)
+
+**Setup:** 1 contract, $5,000 capital, paper + live parallel bots
+
+**What you're doing:** Gathering data on two sets of OA exit settings running side by side. Both bots receive the same signal webhooks — the only difference is exit behavior.
+
+| Bot | Profit Targets | Stop Losses | Touch Monitor |
+|---|---|---|---|
+| Original | Aggressive 15% / Normal 20% / Conservative 40% | 75% / 100% / 150% | $40 ITM, 80% max loss |
+| Test | Aggressive 30% / Normal 30% / Conservative 40% | 75% / 100% / 125% | $15 ITM, 65% max loss |
+
+**Gate to Phase 2:** 30–40+ trades completed. Compare:
+- Total P&L per bot
+- Win rate per tier
+- Average win $ vs average loss $
+- Max drawdown (worst consecutive loss streak)
+
+Pick the winner. Kill the loser.
+
+### Phase 2: Validate (Weeks 8–12)
+
+**Setup:** 2–3 contracts, $10,000–15,000 capital
+
+**What you're doing:** Confirming the winning exit settings hold at slightly larger size. Slippage and fill quality may change with more contracts — this phase catches that.
+
+**Gate to Phase 3:**
+- Win rate per tier holds within 3% of Phase 1 numbers
+- Slippage per trade stays < 5% of premium (compare paper vs live)
+- No drawdown > 30% of allocated capital
+- `validate_outcomes.py --report` shows consistent accuracy
+
+### Phase 3: Scale (Months 4–6)
+
+**Setup:** 5–10 contracts, $25,000–50,000 capital
+
+**What you're doing:** Generating meaningful supplemental income ($1,500–3,500/month at these sizes). SPX liquidity is not a concern — even 50 contracts is invisible in the SPX options pool.
+
+**Gate to Phase 4:**
+- 3+ months of profitable operation at this size
+- Survive at least one high-VIX event (VIX spike > 20) without catastrophic drawdown
+- Signal accuracy (from validation reports) remains stable
+- Emotional discipline: no manual overrides or panic exits outside the system
+
+### Phase 4: Full (Month 6+)
+
+**Setup:** 10–20 contracts, $50,000–100,000 capital
+
+**What you're doing:** Income replacement candidate ($3,000–7,000/month target). At this level, risk management is everything.
+
+**Rules at full scale:**
+- Never risk more than 5% of total capital on a single night
+- Maintain 6-month expense reserve OUTSIDE the trading account (untouchable)
+- If drawdown exceeds 20% of peak account value → drop back to Phase 3 sizing until recovery
+- Review `validate_outcomes.py --report` monthly — if win rate drops below break-even WR for 2 consecutive months, stop trading and reassess
+
+### Key Principles
+
+1. **The system earns the right to more capital.** You don't decide to scale — the data decides.
+2. **Scale up slowly, scale down fast.** It takes months to earn a size increase, but a single bad week should trigger an immediate size reduction.
+3. **Never add capital to recover losses.** If a phase is unprofitable, the answer is better signals/exits, not more contracts.
+4. **The overnight edge is real but finite.** Variance risk premium exists, but it's not infinite free money. Respect the tail.

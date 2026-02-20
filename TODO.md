@@ -81,7 +81,7 @@ Running two OA bots (paper + live each) side by side to test different exit sett
 | Bot | Profit Targets | Stop Losses | Touch Monitor |
 |---|---|---|---|
 | Original | Aggressive 15% / Normal 20% / Conservative 40% | 75% / 100% / 150% | $40 ITM, 80% max loss |
-| Test | Aggressive 30% / Normal 30% / Conservative 40% | 75% / 100% / 125% | $15 ITM, 65% max loss |
+| Test | Aggressive 30% / Normal 30% / Conservative 40% | 75% / 100% / 130% | $15 ITM, 65% max loss |
 
 **Hypothesis:** The original bot is too conservative on wins (small profit targets) and too loose on Conservative losses (wide stop). The test bot captures more on winning nights and cuts losers faster.
 
@@ -90,7 +90,7 @@ Running two OA bots (paper + live each) side by side to test different exit sett
 - Win rate per tier (did wider profit targets reduce win rate?)
 - Average win $ vs average loss $ per tier
 - Max drawdown
-- Break-even win rate: Original Aggressive/Normal need 83.3%, Test needs 71.4%/76.9%
+- Break-even win rate: Original Aggressive/Normal need 83.3%, Test needs 71.4%/76.9%/76.5%
 
 **Decision:** Pick the winner, kill the loser, then proceed with the scaling path.
 

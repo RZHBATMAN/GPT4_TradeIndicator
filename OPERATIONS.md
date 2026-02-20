@@ -196,7 +196,7 @@ A disciplined, data-driven path from initial testing to income generation. **Do 
 | Bot | Profit Targets | Stop Losses | Touch Monitor |
 |---|---|---|---|
 | Original | Aggressive 15% / Normal 20% / Conservative 40% | 75% / 100% / 150% | $40 ITM, 80% max loss |
-| Test | Aggressive 30% / Normal 30% / Conservative 40% | 75% / 100% / 125% | $15 ITM, 65% max loss |
+| Test | Aggressive 30% / Normal 30% / Conservative 40% | 75% / 100% / 130% | $15 ITM, 65% max loss |
 
 **Gate to Phase 2:** 30–40+ trades completed. Compare:
 - Total P&L per bot

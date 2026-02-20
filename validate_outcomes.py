@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """Validate signal outcomes by backfilling next-day SPX data into Google Sheets.
 
-This script reads your signal log from Google Sheets, fetches the next-day
-SPX open/close from Polygon for each signal row, calculates the overnight
-move, and determines whether the signal was "correct."
+This script reads your signal log from Google Sheets, fetches SPX price at
+the OA time-based exit (10:00 AM ET next day) from Polygon, calculates the
+overnight move, and determines whether the signal was "correct."
+
+Exit price logic:
+  1. Primary: SPX at 10:00 AM ET via Polygon minute aggregates
+     (matches OA's time-based exit; captures the actual unmanaged overnight
+     window from ~2 PM entry to 10 AM exit)
+  2. Fallback: Daily open (9:30 AM) if minute data is unavailable
+
+Note on OA exit stack — positions may exit BEFORE 10 AM via:
+  - Profit target (Aggressive 15%, Normal 20%, Conservative 40% of credit)
+  - Stop loss (Aggressive 75%, Normal 100%, Conservative 150% of credit)
+  - Touch monitor (0 DTE: $40 ITM + <80% max loss)
+  This validation uses the 10 AM price as a proxy since we don't have OA's
+  actual fill/exit data. Directionally accurate but not exact.
 
 The Trade_Executed column tracks whether a trade was actually placed:
   YES           — webhook fired, OA executed the trade
@@ -52,6 +65,19 @@ TRADE_PARAMS = {
     'TRADE_NORMAL':     {'width': 25, 'delta': 0.16},
     'TRADE_CONSERVATIVE': {'width': 30, 'delta': 0.14},
 }
+
+# OA exit settings per tier (for reference — actual exits happen in OA)
+# Profit target = % of credit received; Stop loss = % of credit as loss
+# Time-based exit: 10:00 AM ET next day (hard close for all tiers)
+# Touch monitor (0 DTE only): close if $40+ ITM AND loss < 80% of max
+OA_EXIT_PARAMS = {
+    'TRADE_AGGRESSIVE':   {'profit_pct': 15, 'stop_pct': 75},
+    'TRADE_NORMAL':       {'profit_pct': 20, 'stop_pct': 100},
+    'TRADE_CONSERVATIVE': {'profit_pct': 40, 'stop_pct': 150},
+}
+OA_TIME_EXIT = '10:00'       # ET — hard close for all tiers
+OA_TOUCH_ITM_AMOUNT = 40     # dollars ITM to trigger touch monitor
+OA_TOUCH_MAX_LOSS_PCT = 80   # don't close if loss already exceeds this %
 
 # Breakeven thresholds derived from delta:
 # Short strike distance ≈ delta * daily_vol * SPX_price (simplified)
@@ -176,6 +202,45 @@ def _fetch_spx_day(date_str: str, api_key: str, max_holiday_retries: int = 5
     return None
 
 
+def _fetch_spx_10am_price(date_str: str, api_key: str) -> Optional[float]:
+    """Fetch SPX price at 10:00 AM ET using Polygon minute aggregates.
+
+    This matches the OA time-based exit. Returns the close price of the
+    minute bar closest to 10:00 AM ET, or None if unavailable.
+    """
+    try:
+        url = (
+            f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/minute/"
+            f"{date_str}/{date_str}?adjusted=true&sort=asc&limit=500&apiKey={api_key}"
+        )
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        results = data.get('results', [])
+        if not results:
+            return None
+
+        # Find the bar at 10:00 AM ET
+        target_dt = ET_TZ.localize(
+            datetime.strptime(f"{date_str} 10:00", "%Y-%m-%d %H:%M")
+        )
+        target_ts = int(target_dt.timestamp() * 1000)
+
+        closest_bar = min(results, key=lambda b: abs(b['t'] - target_ts))
+
+        # Verify within 2 minutes of target (market must be open)
+        diff_minutes = abs(closest_bar['t'] - target_ts) / 60000
+        if diff_minutes > 2:
+            return None
+
+        return closest_bar['c']
+    except Exception as e:
+        print(f"  [Polygon] Minute data error for {date_str}: {e}")
+        return None
+
+
 def _infer_trade_executed(signal: str, trade_executed_raw: str) -> str:
     """Infer Trade_Executed for legacy rows that don't have the column.
 
@@ -195,10 +260,14 @@ def _evaluate_outcome(
     signal: str,
     trade_executed: str,
     spx_entry: float,
-    spx_next_open: float,
+    spx_exit_price: float,
     spx_next_close: float,
 ) -> Tuple[float, str]:
     """Calculate overnight move and determine if the outcome was correct.
+
+    The exit price should be SPX at 10:00 AM ET (matching OA's time-based
+    exit) when available, or the daily open as fallback. This captures the
+    unmanaged overnight exposure window from ~2 PM entry to 10 AM exit.
 
     Uses Trade_Executed to decide:
       - YES → check against tier-specific breakeven threshold
@@ -206,8 +275,8 @@ def _evaluate_outcome(
 
     Returns (overnight_move_pct, outcome_str).
     """
-    # Overnight move = gap between entry price and next-day open
-    overnight_move_pct = abs((spx_next_open - spx_entry) / spx_entry) * 100
+    # Overnight move = entry price to exit price (10 AM ET or daily open)
+    overnight_move_pct = abs((spx_exit_price - spx_entry) / spx_entry) * 100
 
     actually_traded = trade_executed == 'YES'
 
@@ -338,8 +407,18 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
 
         spx_next_open = day_data['open']
         spx_next_close = day_data['close']
+
+        # Try to get 10 AM exit price (matches OA time-based exit)
+        spx_10am = _fetch_spx_10am_price(actual_date, api_key)
+        if spx_10am is not None:
+            spx_exit_price = spx_10am
+            exit_source = "10AM"
+        else:
+            spx_exit_price = spx_next_open
+            exit_source = "open"
+
         overnight_move_pct, outcome = _evaluate_outcome(
-            signal, trade_executed, spx_entry, spx_next_open, spx_next_close
+            signal, trade_executed, spx_entry, spx_exit_price, spx_next_close
         )
 
         result = {
@@ -348,19 +427,21 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
             'signal': signal,
             'trade_executed': trade_executed,
             'spx_entry': spx_entry,
-            'spx_next_open': spx_next_open,
+            'spx_exit_price': spx_exit_price,
             'spx_next_close': spx_next_close,
             'overnight_move_pct': overnight_move_pct,
             'outcome': outcome,
+            'exit_source': exit_source,
         }
         results.append(result)
 
-        print(f"           Next open={spx_next_open:.2f} | Move={overnight_move_pct:+.4f}% | {outcome}")
+        print(f"           Exit={spx_exit_price:.2f} ({exit_source}) | Move={overnight_move_pct:+.4f}% | {outcome}")
 
         if not dry_run:
             # Update cells: columns are 1-indexed in gspread
+            # COL_SPX_NEXT_OPEN stores exit price (10 AM when available, else daily open)
             try:
-                ws.update_cell(row_idx + 1, COL_SPX_NEXT_OPEN + 1, spx_next_open)
+                ws.update_cell(row_idx + 1, COL_SPX_NEXT_OPEN + 1, spx_exit_price)
                 ws.update_cell(row_idx + 1, COL_SPX_NEXT_CLOSE + 1, spx_next_close)
                 ws.update_cell(row_idx + 1, COL_OVERNIGHT_MOVE + 1, f"{overnight_move_pct:+.4f}%")
                 ws.update_cell(row_idx + 1, COL_OUTCOME_CORRECT + 1, outcome)

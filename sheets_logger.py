@@ -40,6 +40,7 @@ SHEET_HEADERS = [
     "Override_Applied",
     "Score_Adjustment",
     # Outcome tracking columns (filled later by validate_outcomes.py)
+    # SPX_Next_Open = exit price: 10 AM ET minute data when available, else daily open
     "SPX_Next_Open",
     "SPX_Next_Close",
     "Overnight_Move_Pct",

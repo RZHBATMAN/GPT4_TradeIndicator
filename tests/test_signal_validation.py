@@ -544,3 +544,66 @@ class TestBacktest:
         bar = {'c': 15.5}
         result = _build_vix1d_data(bar)
         assert result['current'] == 15.5
+
+
+# ── Outcome Evaluation Tests ────────────────────────────────────────────
+
+
+class TestOutcomeEvaluation:
+    """Test outcome evaluation logic including OA exit price handling."""
+
+    def test_correct_trade_within_threshold(self):
+        """Overnight move within breakeven → CORRECT_TRADE."""
+        from validate_outcomes import _evaluate_outcome
+        # SPX entry 5800, exit 5830 → 0.517% move (< 1.00% aggressive threshold)
+        move, outcome = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, 5830, 5840)
+        assert outcome == 'CORRECT_TRADE'
+        assert move < 1.00
+
+    def test_wrong_trade_beyond_threshold(self):
+        """Overnight move beyond breakeven → WRONG_TRADE."""
+        from validate_outcomes import _evaluate_outcome
+        # SPX entry 5800, exit 5860 → 1.034% move (> 1.00% aggressive threshold)
+        move, outcome = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, 5860, 5870)
+        assert outcome == 'WRONG_TRADE'
+        assert move >= 1.00
+
+    def test_conservative_wider_threshold(self):
+        """Conservative uses 0.80% threshold, narrower than aggressive."""
+        from validate_outcomes import _evaluate_outcome
+        # 0.85% move: within aggressive threshold but beyond conservative
+        exit_price = 5800 * (1 + 0.0085)
+        move, outcome = _evaluate_outcome('TRADE_CONSERVATIVE', 'YES', 5800, exit_price, exit_price + 10)
+        assert outcome == 'WRONG_TRADE'
+        # Same move should be fine for aggressive
+        move2, outcome2 = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, exit_price, exit_price + 10)
+        assert outcome2 == 'CORRECT_TRADE'
+
+    def test_skip_correct_when_big_move(self):
+        """SKIP is correct when overnight move >= 0.80%."""
+        from validate_outcomes import _evaluate_outcome
+        exit_price = 5800 * (1 + 0.009)  # 0.9% move
+        move, outcome = _evaluate_outcome('SKIP', 'NO_SKIP', 5800, exit_price, exit_price + 5)
+        assert outcome == 'CORRECT_SKIP'
+
+    def test_skip_wrong_when_small_move(self):
+        """SKIP is wrong when overnight move < 0.80% (missed opportunity)."""
+        from validate_outcomes import _evaluate_outcome
+        move, outcome = _evaluate_outcome('SKIP', 'NO_SKIP', 5800, 5810, 5815)
+        assert outcome == 'WRONG_SKIP'
+
+    def test_exit_price_used_not_close(self):
+        """The exit price (param 4) drives the outcome, not the close (param 5)."""
+        from validate_outcomes import _evaluate_outcome
+        # Exit at 5805 (tiny move), close at 5900 (huge move)
+        move, outcome = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, 5805, 5900)
+        assert outcome == 'CORRECT_TRADE'
+        assert move < 0.10  # Uses exit price, not close
+
+    def test_oa_exit_params_documented(self):
+        """OA exit parameters are documented as constants."""
+        from validate_outcomes import OA_EXIT_PARAMS, OA_TIME_EXIT
+        assert OA_EXIT_PARAMS['TRADE_AGGRESSIVE']['profit_pct'] == 15
+        assert OA_EXIT_PARAMS['TRADE_NORMAL']['stop_pct'] == 100
+        assert OA_EXIT_PARAMS['TRADE_CONSERVATIVE']['profit_pct'] == 40
+        assert OA_TIME_EXIT == '10:00'

@@ -30,9 +30,21 @@ SHEET_HEADERS = [
     "GPT_Key_Risk",
     "Webhook_Success",
     "SPX_Current",
+    "VIX",
+    "Trade_Executed",
     "Raw_Articles",
     "Sent_To_GPT",
     "GPT_Reasoning",
+    # Contradiction detection
+    "Contradiction_Flags",
+    "Override_Applied",
+    "Score_Adjustment",
+    # Outcome tracking columns (filled later by validate_outcomes.py)
+    # SPX_Next_Open = exit price: 10 AM ET minute data when available, else daily open
+    "SPX_Next_Open",
+    "SPX_Next_Close",
+    "Overnight_Move_Pct",
+    "Outcome_Correct",
 ]
 
 
@@ -88,12 +100,19 @@ def _client_and_sheet():
 
 
 def _ensure_header(ws) -> None:
-    """If worksheet is empty, append header row."""
+    """Insert header row if missing, or update it if columns were added since last run."""
     try:
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != SHEET_HEADERS[0]:
             ws.insert_row(SHEET_HEADERS, 1)
             print("[Sheets] Header row inserted (first run)")
+        elif len(first_row) < len(SHEET_HEADERS):
+            # Header exists but is shorter than current SHEET_HEADERS — patch missing columns
+            missing = SHEET_HEADERS[len(first_row):]
+            start_col = len(first_row) + 1  # 1-indexed
+            for i, hdr in enumerate(missing):
+                ws.update_cell(1, start_col + i, hdr)
+            print(f"[Sheets] Header row extended: added {len(missing)} new columns ({', '.join(missing)})")
     except Exception as e:
         print(f"[Sheets] Could not ensure header row: {e}")
         logger.warning("Could not ensure header row: %s", e)
@@ -111,6 +130,9 @@ def log_signal(
     vix1d_current: float,
     filter_stats: Dict[str, Any],
     webhook_success: bool,
+    contradictions: Optional[Dict[str, Any]] = None,
+    vix_current: Optional[float] = None,
+    trade_executed: str = "",
 ) -> None:
     """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
     print("[Sheets] log_signal called")
@@ -123,6 +145,16 @@ def log_signal(
         _ensure_header(ws)
 
         reasoning = (gpt.get("reasoning") or "")[:500]
+
+        # Contradiction fields
+        if contradictions:
+            flags_str = "; ".join(contradictions.get("contradiction_flags", [])) or "None"
+            override = contradictions.get("override_signal") or "None"
+            adj = contradictions.get("score_adjustment", 0)
+        else:
+            flags_str = "N/A"
+            override = "N/A"
+            adj = 0
 
         row: List[Any] = [
             timestamp,
@@ -142,9 +174,20 @@ def log_signal(
             gpt.get("key_risk", ""),
             webhook_success,
             spx_current,
+            vix_current if vix_current is not None else "",
+            trade_executed,
             filter_stats.get("raw_articles", ""),
             filter_stats.get("sent_to_gpt", ""),
             reasoning,
+            # Contradiction columns
+            flags_str,
+            override,
+            adj,
+            # Outcome columns — left blank, filled by validate_outcomes.py
+            "",  # SPX_Next_Open
+            "",  # SPX_Next_Close
+            "",  # Overnight_Move_Pct
+            "",  # Outcome_Correct
         ]
 
         ws.append_row(row, value_input_option="USER_ENTERED")

@@ -13,16 +13,19 @@ import pytz
 import os
 import threading
 import time as time_module
+import random
 import requests
 
 # Import modular components
 from config.loader import get_config
-from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_spx_aggregates
+from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_vix_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_vix_snapshot, get_spx_aggregates
 from data.news_fetcher import fetch_news_raw
 from processing.pipeline import process_news_pipeline
 from signal_engine import run_signal_analysis
 from webhooks import send_webhook
 from sheets_logger import log_signal as log_signal_to_sheets
+from alerting import record_signal_success, record_api_failure, record_poke, check_end_of_window, reset_daily, get_alert_status
+from data.oa_event_calendar import check_oa_event_gates, format_gate_reasons
 
 app = Flask(__name__)
 
@@ -39,11 +42,19 @@ POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
 
 # Derived: True when config was loaded from .config (local), False when env-only (e.g. Railway)
 IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
+
+# Signal consistency: track whether we've already sent a webhook today.
+# Once a webhook fires, Option Alpha creates a label and places a trade.
+# Subsequent pokes within the same day are logged but do NOT fire webhooks.
+# Option Alpha VIX gate: OA will not open positions when VIX >= this value
+OA_VIX_GATE = 25
+
+_daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None}
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
 POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
-# MiniMax model in use (default MiniMax-M2.1 if not set)
-MINIMAX_MODEL_DISPLAY = (CONFIG.get("MINIMAX_MODEL") or "").strip() or "MiniMax-M2.1"
+# OpenAI model in use (default gpt-4o-mini if not set)
+OPENAI_MODEL_DISPLAY = (CONFIG.get("OPENAI_MODEL") or "").strip() or "gpt-4o-mini"
 
 # ============================================================================
 # TRADING WINDOW CHECK
@@ -213,24 +224,28 @@ def homepage():
             
             <div class="strategy-box">
                 <div class="strategy-title">🎯 Trading Strategy: Overnight Vol Premium Capture</div>
-                
+
                 <div class="edge-item">
                     <div class="edge-label">📈 Core Edge:</div>
                     <div class="edge-desc">
-                        Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility 
+                        Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility
                         and overnight news risk is manageable. Capture theta decay + vol premium during the ~16-hour overnight period.
+                        Exit at 10:00 AM next day via Option Alpha time-based exit.
                     </div>
                 </div>
-                
+
                 <div class="edge-item">
-                    <div class="edge-label">🔍 Trading Factors (3 Factors):</div>
+                    <div class="edge-label">🔍 Signal Factors (3 Factors + Safety Layers):</div>
                     <div class="edge-desc">
-                        <strong>1. IV/RV Ratio (30%):</strong> Real VIX1D (1-day forward IV) vs 10-day realized vol.<br>
-                        <strong>2. Market Trend (20%):</strong> Analyzes momentum and intraday volatility.<br>
-                        <strong>3. GPT News Analysis (50%):</strong> Triple-layer filtering (Algo dedup → Keyword → GPT).
+                        <strong>1. IV/RV Ratio + Term Structure (30%):</strong> VIX1D vs 10-day RV, plus VIX1D/VIX inversion detection.<br>
+                        <strong>2. Market Trend (20%):</strong> 5-day momentum + intraday volatility (symmetric scoring).<br>
+                        <strong>3. AI News Analysis (50%):</strong> Triple-layer filtering → GPT risk scoring.<br>
+                        <strong>+ Contradiction Detection:</strong> Override to SKIP when indicators conflict dangerously.<br>
+                        <strong>+ Mag 7 Earnings Calendar:</strong> Auto-boost risk score when major earnings are due.<br>
+                        <strong>+ Confirmation Pass:</strong> Runs analysis twice, uses the more conservative result.
                     </div>
                 </div>
-                
+
                 <div class="edge-item">
                     <div class="edge-label">⚡ Trade Sizing Logic:</div>
                     <div class="edge-desc">
@@ -238,6 +253,14 @@ def homepage():
                         <strong>NORMAL:</strong> Score 3.5-5.0 → 25pt width, 0.16 delta<br>
                         <strong>CONSERVATIVE:</strong> Score 5.0-7.5 → 30pt width, 0.14 delta<br>
                         <strong>SKIP:</strong> Score ≥7.5 → No trade
+                    </div>
+                </div>
+
+                <div class="edge-item">
+                    <div class="edge-label">🔒 Webhook Safety:</div>
+                    <div class="edge-desc">
+                        Only one webhook fires per trading day. Once Option Alpha receives the signal and places the trade,
+                        subsequent poke cycles log data to Sheets but do not send duplicate webhooks.
                     </div>
                 </div>
             </div>
@@ -277,12 +300,20 @@ def homepage():
                     <span class="info-value">Real I:VIX1D snapshot (15-min delayed, 1-day forward IV)</span>
                 </div>
                 <div class="info-item">
+                    <span class="info-label">VIX (30-day):</span>
+                    <span class="info-value">I:VIX for term structure analysis (contango vs inversion)</span>
+                </div>
+                <div class="info-item">
                     <span class="info-label">News Sources:</span>
                     <span class="info-value">Yahoo Finance RSS + Google News RSS (FREE)</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">AI Analysis:</span>
-                    <span class="info-value">MiniMax ({MINIMAX_MODEL_DISPLAY})</span>
+                    <span class="info-value">OpenAI ({OPENAI_MODEL_DISPLAY}), temperature=0.1</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Earnings Calendar:</span>
+                    <span class="info-value">Polygon ticker events API (Mag 7 earnings dates)</span>
                 </div>
             </div>
             
@@ -291,6 +322,7 @@ def homepage():
                 <div class="endpoint"><a href="/health">/health</a> - Health check</div>
                 <div class="endpoint"><a href="/option_alpha_trigger">/option_alpha_trigger</a> - Generate trading signal</div>
                 <div class="endpoint"><a href="/test_polygon_delayed">/test_polygon_delayed</a> - Test Polygon data</div>
+                <div class="endpoint"><a href="/test_slack">/test_slack</a> - Send test Slack alert</div>
             </div>
         </div>
     </body>
@@ -311,7 +343,8 @@ def health_check():
         "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
         "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
         "spx_data": "Real I:SPX (15-min delayed)",
-        "vix_data": "Real I:VIX1D (15-min delayed, 1-day forward IV)"
+        "vix_data": "Real I:VIX1D (15-min delayed, 1-day forward IV)",
+        "alerting": get_alert_status(),
     }), 200
 
 @app.route("/option_alpha_trigger", methods=["GET", "POST"])
@@ -337,13 +370,18 @@ def option_alpha_trigger():
         # Fetch SPX data (snapshot + aggregates)
         spx_data = get_spx_data_with_retry(max_retries=3)
         if not spx_data:
+            record_api_failure('Polygon_SPX')
             return jsonify({"status": "error", "message": "SPX data failed after 3 retries (Polygon)"}), 500
-        
+
         # Fetch VIX1D data
         vix1d_data = get_vix1d_with_retry(max_retries=3)
         if not vix1d_data:
+            record_api_failure('Polygon_VIX1D')
             return jsonify({"status": "error", "message": "VIX1D data failed after 3 retries (Polygon)"}), 500
-        
+
+        # Fetch VIX (30-day) for term structure — non-critical, OK if it fails
+        vix_data = get_vix_with_retry(max_retries=2)
+
         # Fetch and process news
         print(f"[{timestamp}] Fetching news from RSS sources...")
         raw_articles = fetch_news_raw()
@@ -354,11 +392,12 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Analyzing factors...")
         
         # Use the signal engine to run all analysis
-        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data)
+        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
         
         factors = analysis_result['indicators']  # Internal: signal_engine uses 'indicators' key
         composite = analysis_result['composite']
         signal = analysis_result['signal']
+        contradictions = analysis_result.get('contradictions')
         
         iv_rv = factors['iv_rv']
         trend = factors['trend']
@@ -374,6 +413,11 @@ def option_alpha_trigger():
         print(f"[{timestamp}]   - IV/RV Ratio: {iv_rv['iv_rv_ratio']:.3f}")
         if 'rv_change' in iv_rv:
             print(f"[{timestamp}]   - RV Change: {iv_rv['rv_change']*100:+.2f}%")
+        if 'term_structure_ratio' in iv_rv:
+            print(f"[{timestamp}]   - VIX (30-day): {iv_rv.get('vix_30d', 'N/A')}")
+            print(f"[{timestamp}]   - Term Structure: {iv_rv.get('term_structure', 'N/A')} (VIX1D/VIX = {iv_rv['term_structure_ratio']:.3f})")
+            if iv_rv.get('term_modifier', 0) > 0:
+                print(f"[{timestamp}]   - Term Structure Modifier: +{iv_rv['term_modifier']}")
         print(f"[{timestamp}]   - Factor Score: {iv_rv['score']:.1f}/10")
         print(f"[{timestamp}]   - Weighted Contribution: {iv_rv['score'] * 0.30:.2f}")
         
@@ -412,15 +456,114 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Category: {composite['category']}")
         print(f"[{timestamp}] Breakdown: ({iv_rv['score']:.1f} × 0.30) + ({trend['score']:.1f} × 0.20) + ({gpt['score']:.1f} × 0.50) = {composite['score']:.1f}")
         
+        # ── Signal confirmation: run a second analysis pass ──
+        # GPT is non-deterministic. Before committing to a webhook (which
+        # triggers Option Alpha to place a real trade), run the signal pipeline
+        # a second time and use the MORE CONSERVATIVE of the two results.
+        # This costs one extra OpenAI call but prevents the worst case:
+        # a lucky low GPT score triggering an aggressive trade.
+        print(f"\n[{timestamp}] ========== CONFIRMATION PASS ==========")
+        print(f"[{timestamp}] Running second analysis for signal confirmation...")
+        time_module.sleep(2)  # brief delay so GPT sees slightly different state
+
+        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
+        composite_2 = analysis_result_2['composite']
+        signal_2 = analysis_result_2['signal']
+        contradictions_2 = analysis_result_2.get('contradictions')
+
+        # Pick the more conservative (higher composite = more cautious)
+        tier_order = ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP']
+        idx_1 = tier_order.index(signal['signal']) if signal['signal'] in tier_order else 3
+        idx_2 = tier_order.index(signal_2['signal']) if signal_2['signal'] in tier_order else 3
+
+        if idx_2 > idx_1:
+            # Second pass is more conservative — use it
+            print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
+            print(f"[{timestamp}] Pass 2: {signal_2['signal']} (score={composite_2['score']:.1f})")
+            print(f"[{timestamp}] → Using more conservative: {signal_2['signal']}")
+            signal = signal_2
+            composite = composite_2
+            contradictions = contradictions_2
+        elif idx_1 > idx_2:
+            print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
+            print(f"[{timestamp}] Pass 2: {signal_2['signal']} (score={composite_2['score']:.1f})")
+            print(f"[{timestamp}] → Using more conservative: {signal['signal']}")
+        else:
+            print(f"[{timestamp}] Both passes agree: {signal['signal']} ✓")
+        print(f"[{timestamp}] ========================================\n")
+
+        # ── Once-per-day webhook: only fire the first signal of each day ──
+        # Once OA receives a webhook, it creates a label and places a trade.
+        # Subsequent pokes on the same day are still logged (to Sheets) but
+        # do NOT fire another webhook — the trade is already placed.
+        today_str = now.strftime('%Y-%m-%d')
+        webhook_skipped = False
+
+        if _daily_signal_cache['date'] != today_str:
+            # New trading day — reset
+            _daily_signal_cache['date'] = today_str
+            _daily_signal_cache['webhook_sent'] = False
+            _daily_signal_cache['signal'] = None
+            _daily_signal_cache['score'] = None
+
         # Final Signal
         print(f"\n[{timestamp}] ========== FINAL SIGNAL ==========")
         print(f"[{timestamp}] Signal: {signal['signal']}")
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
+
+        is_friday = now.weekday() == 4
+        vix_current = iv_rv.get('vix_30d')
+        vix_blocked = vix_current is not None and vix_current >= OA_VIX_GATE
+        oa_event_gates = check_oa_event_gates(now)
+
+        if is_friday:
+            # Friday: log signal to Sheets for validation, but do NOT send webhook
+            # (no live trades on Fridays — weekend theta decay risk)
+            webhook_skipped = True
+            trade_executed = "NO_FRIDAY"
+            print(f"[{timestamp}] Friday — signal logged for validation only, no webhook to Option Alpha.")
+            webhook = {'success': True, 'skipped': True, 'friday': True}
+        elif _daily_signal_cache['webhook_sent']:
+            # Already sent today — log only, no webhook
+            webhook_skipped = True
+            trade_executed = "NO_DUPLICATE"
+            prior = _daily_signal_cache['signal']
+            print(f"[{timestamp}] Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
+            webhook = {'success': True, 'skipped': True}
+        else:
+            # First signal of the day — fire webhook
+            webhook = send_webhook(signal)
+            _daily_signal_cache['webhook_sent'] = True
+            _daily_signal_cache['signal'] = signal['signal']
+            _daily_signal_cache['score'] = composite['score']
+            print(f"[{timestamp}] Webhook fired: {signal['signal']}")
+
+            # Determine actual trade execution status — check all OA gates
+            if signal['signal'] == 'SKIP':
+                trade_executed = "NO_SKIP"
+            elif vix_blocked:
+                trade_executed = f"NO_VIX_GATE (VIX={vix_current:.1f})"
+                print(f"[{timestamp}] VIX={vix_current:.1f} >= {OA_VIX_GATE} — OA will block this trade")
+            elif oa_event_gates:
+                trade_executed = f"NO_OA_EVENT ({format_gate_reasons(oa_event_gates)})"
+                print(f"[{timestamp}] OA event gate active: {format_gate_reasons(oa_event_gates)}")
+            else:
+                trade_executed = "YES"
+
+        print(f"[{timestamp}] Trade Executed: {trade_executed}")
         print(f"[{timestamp}] ======================================\n")
-        
-        # Send webhook
-        webhook = send_webhook(signal)
+
+        # Log contradiction detection
+        if contradictions and contradictions.get('contradiction_flags'):
+            print(f"\n[{timestamp}] ========== CONTRADICTION DETECTION ==========")
+            for flag in contradictions['contradiction_flags']:
+                print(f"[{timestamp}]   - {flag}")
+            if contradictions.get('override_signal'):
+                print(f"[{timestamp}]   >>> OVERRIDE: {contradictions['override_signal']}")
+            if contradictions.get('score_adjustment'):
+                print(f"[{timestamp}]   >>> ADJUSTMENT: +{contradictions['score_adjustment']}")
+            print(f"[{timestamp}] =============================================\n")
 
         # Log to Google Sheet for history/backtesting (optional; no-op if not configured)
         log_signal_to_sheets(
@@ -434,7 +577,13 @@ def option_alpha_trigger():
             vix1d_current=vix1d_data["current"],
             filter_stats=news_data.get("filter_stats", {}),
             webhook_success=webhook.get("success", False),
+            contradictions=contradictions,
+            vix_current=vix_current,
+            trade_executed=trade_executed,
         )
+
+        # Record successful signal for alerting
+        record_signal_success()
 
         # Format news headlines
         news_headlines = []
@@ -491,7 +640,10 @@ def option_alpha_trigger():
                 "implied_vol": f"{iv_rv['implied_vol']}%",
                 "vix1d_value": iv_rv['vix1d_value'],
                 "tenor": "1-day (VIX1D)",
-                "source": "Polygon VIX1D (real data)"
+                "source": "Polygon VIX1D (real data)",
+                "vix_30d": iv_rv.get('vix_30d'),
+                "term_structure": iv_rv.get('term_structure'),
+                "term_structure_ratio": iv_rv.get('term_structure_ratio'),
             },
             
             "factor_2_trend": {
@@ -566,7 +718,14 @@ def test_polygon_delayed():
         'status': '✅ SUCCESS' if vix1d_snapshot else '❌ FAILED',
         'data': vix1d_snapshot
     }
-    
+
+    # Test VIX (30-day) snapshot
+    vix_snapshot = get_vix_snapshot()
+    results['vix_snapshot'] = {
+        'status': '✅ SUCCESS' if vix_snapshot else '❌ FAILED',
+        'data': vix_snapshot
+    }
+
     # Test SPX aggregates
     spx_agg = get_spx_aggregates()
     results['spx_aggregates'] = {
@@ -585,31 +744,97 @@ def test_polygon_delayed():
     
     return jsonify(results), 200
 
+@app.route("/test_slack", methods=["GET"])
+def test_slack():
+    """Send a test alert to Slack to verify webhook configuration."""
+    from alerting import _send_alert
+
+    now = datetime.now(ET_TZ)
+    timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+
+    success = _send_alert(
+        "Test Alert",
+        "This is a test alert from Ren's SPX Vol Signal. "
+        "If you see this in Slack, alerting is working correctly!",
+        level='info',
+    )
+
+    if success:
+        return jsonify({
+            "status": "success",
+            "message": "Test alert sent to Slack successfully!",
+            "timestamp": timestamp,
+        }), 200
+    else:
+        # Check if webhook is configured at all
+        from alerting import _get_webhook_url
+        url = _get_webhook_url()
+        if not url:
+            return jsonify({
+                "status": "error",
+                "message": "ALERT_WEBHOOK_URL is not configured. "
+                           "Add it to .config [WEBHOOKS] section or set as env var.",
+                "timestamp": timestamp,
+            }), 400
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Webhook is configured but the alert failed to send. "
+                           "Check that the URL is a valid Slack incoming webhook.",
+                "webhook_url_prefix": url[:40] + "...",
+                "timestamp": timestamp,
+            }), 500
+
 # ============================================================================
 # BACKGROUND THREAD
 # ============================================================================
 
 def poke_self():
-    """Background thread: Trigger analysis every 20 minutes during trading hours.
+    """Background thread: Trigger analysis during trading hours.
     Not started when IS_LOCAL so one manual click = one run when testing.
+
+    First trigger of each day is randomized between 1:30-1:39 PM ET
+    (uniform distribution) to avoid predictable execution patterns.
+    Follow-up triggers at :50 and :10 remain fixed as fallbacks.
     """
     print("[POKE] Background thread started")
     # Use same host/port as the app so it works when PORT is overridden (e.g. Railway)
     base_url = os.environ.get("POKE_BASE_URL", "http://localhost:8080")
     timeout_sec = int(os.environ.get("POKE_TIMEOUT", "300"))  # 5 min; GPT can be slow
 
+    # Per-day randomized first-poke minute (set fresh each trading day)
+    _poke_date = None
+    _first_poke_minute = 30  # default, overwritten each day
+
     while True:
         try:
             now = datetime.now(ET_TZ)
             current_time = now.time()
+            today_str = now.strftime('%Y-%m-%d')
+
+            # Pick a random first-poke minute for each new day (1:30–1:39 PM)
+            if _poke_date != today_str:
+                _poke_date = today_str
+                _first_poke_minute = random.randint(30, 39)
+                print(f"[POKE] Today's first trigger scheduled for 1:{_first_poke_minute:02d} PM ET")
+
+            # Reset alert dedup at midnight
+            if current_time.hour == 0 and current_time.minute == 0 and current_time.second < 30:
+                reset_daily()
 
             if is_within_trading_window(now):
-                if current_time.minute in [30, 50, 10] and current_time.second < 30:
+                record_poke()
+                # First poke: randomized minute; follow-ups at :50 and :10
+                if current_time.minute in [_first_poke_minute, 50, 10] and current_time.second < 30:
                     print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
                     try:
                         requests.get(f"{base_url}/option_alpha_trigger", timeout=timeout_sec)
                     except Exception as e:
                         print(f"[POKE] Error: {e}")
+
+            # Check if window just ended (2:31-2:35 PM) and no signal was generated
+            if dt_time(14, 31) <= current_time <= dt_time(14, 35) and now.weekday() < 5:
+                check_end_of_window()
 
             time_module.sleep(30)
 
@@ -634,7 +859,7 @@ if __name__ == "__main__":
     print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
     print(f"SPX: Real I:SPX (15-min delayed)")
     print(f"VIX1D: Real I:VIX1D (15-min delayed, 1-day forward IV)")
-    print(f"AI Analysis: MiniMax ({MINIMAX_MODEL_DISPLAY})")
+    print(f"AI Analysis: OpenAI ({OPENAI_MODEL_DISPLAY})")
     print("=" * 80)
 
     # Start POKE thread only in production so local = one click = one run

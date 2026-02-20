@@ -63,21 +63,6 @@ Weekend exposure is ~64 hours vs the usual ~16 hours overnight. If Friday signal
 
 ---
 
-### Think about: Exit strategy tuning based on OA backtests
-
-Weekend exposure is ~64 hours vs the usual ~16 hours overnight. If Friday signals have a significantly higher WRONG_TRADE rate, consider adding a configurable Friday modifier (e.g., +1.5 to composite score on Fridays, biasing toward SKIP or CONSERVATIVE).
-
-**What to do:**
-- After 1-2 months of data, run `validate_outcomes.py --report`
-- Filter outcome data for Friday signals vs Mon-Thu signals
-- Compare WRONG_TRADE rates and average overnight move magnitudes
-- If Friday is meaningfully worse → add a `FRIDAY_SCORE_MODIFIER` to `signal_engine.py`
-- If Friday is comparable → leave as-is
-
-**File:** `signal_engine.py`
-
----
-
 ### Think about: Paper vs live execution quality
 
 Running paper and live OA bots in parallel with the same recipe. After 1 month, compare fill quality and slippage (see [OPERATIONS.md](OPERATIONS.md) "Compare Paper vs Live" section).

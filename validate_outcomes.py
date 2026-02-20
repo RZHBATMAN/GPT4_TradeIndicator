@@ -144,35 +144,6 @@ def _next_weekday(dt: datetime) -> datetime:
     return next_day
 
 
-def _parse_signal_date(date_str: str) -> Optional[datetime]:
-    """Parse a timestamp string from the sheet into a datetime."""
-    for fmt in [
-        "%Y-%m-%d %I:%M:%S %p %Z",
-        "%Y-%m-%d %I:%M:%S %p ET",
-        "%Y-%m-%d %I:%M:%S %p EST",
-        "%Y-%m-%d %I:%M:%S %p EDT",
-        "%Y-%m-%d",
-    ]:
-        try:
-            return datetime.strptime(date_str.strip(), fmt)
-        except ValueError:
-            continue
-    # Last resort: dateutil
-    try:
-        from dateutil import parser as dp
-        return dp.parse(date_str.strip())
-    except Exception:
-        return None
-
-
-def _next_weekday(dt: datetime) -> datetime:
-    """Advance a datetime to the next weekday (skip weekends)."""
-    next_day = dt + timedelta(days=1)
-    while next_day.weekday() >= 5:
-        next_day += timedelta(days=1)
-    return next_day
-
-
 def _get_next_trading_day(date_str: str) -> str:
     """Given a date string from the sheet, return the next trading day (skip weekends)."""
     try:
@@ -229,6 +200,45 @@ def _fetch_spx_day(date_str: str, api_key: str, max_holiday_retries: int = 5
 
     print(f"  [Polygon] No data found after {max_holiday_retries} retries from {date_str}")
     return None
+
+
+def _fetch_spx_10am_price(date_str: str, api_key: str) -> Optional[float]:
+    """Fetch SPX price at 10:00 AM ET using Polygon minute aggregates.
+
+    This matches the OA time-based exit. Returns the close price of the
+    minute bar closest to 10:00 AM ET, or None if unavailable.
+    """
+    try:
+        url = (
+            f"https://api.massive.com/v2/aggs/ticker/I:SPX/range/1/minute/"
+            f"{date_str}/{date_str}?adjusted=true&sort=asc&limit=500&apiKey={api_key}"
+        )
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        results = data.get('results', [])
+        if not results:
+            return None
+
+        # Find the bar at 10:00 AM ET
+        target_dt = ET_TZ.localize(
+            datetime.strptime(f"{date_str} 10:00", "%Y-%m-%d %H:%M")
+        )
+        target_ts = int(target_dt.timestamp() * 1000)
+
+        closest_bar = min(results, key=lambda b: abs(b['t'] - target_ts))
+
+        # Verify within 2 minutes of target (market must be open)
+        diff_minutes = abs(closest_bar['t'] - target_ts) / 60000
+        if diff_minutes > 2:
+            return None
+
+        return closest_bar['c']
+    except Exception as e:
+        print(f"  [Polygon] Minute data error for {date_str}: {e}")
+        return None
 
 
 def _infer_trade_executed(signal: str, trade_executed_raw: str) -> str:

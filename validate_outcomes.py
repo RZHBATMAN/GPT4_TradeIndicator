@@ -100,6 +100,9 @@ MOVE_THRESHOLDS = {
 # Threshold for "was not trading correct?" — if move >= this, not trading was right
 NO_TRADE_THRESHOLD = 0.80
 
+# Columns used for poke stability analysis
+COL_SENT_TO_GPT = 21
+
 # Column indices (0-based) matching SHEET_HEADERS in sheets_logger.py
 COL_TIMESTAMP = 0
 COL_POKE_NUMBER = 1
@@ -305,6 +308,79 @@ def _evaluate_outcome(
     return round(overnight_move_pct, 4), outcome
 
 
+def _hypothetical_outcome(signal: str, overnight_move_pct: float) -> str:
+    """Determine what the outcome WOULD have been for a given signal.
+
+    Unlike _evaluate_outcome which uses actual Trade_Executed status, this
+    evaluates purely based on the signal: if we had followed this signal,
+    would the overnight move have been within safe bounds?
+
+    Returns 'CORRECT' or 'WRONG'.
+    """
+    if signal == 'SKIP':
+        # SKIP is correct if the move was large enough to blow a condor
+        return 'CORRECT' if overnight_move_pct >= NO_TRADE_THRESHOLD else 'WRONG'
+    # TRADE_* signals: correct if the move was within the tier's breakeven
+    threshold = MOVE_THRESHOLDS.get(signal, 0.80)
+    return 'CORRECT' if overnight_move_pct < threshold else 'WRONG'
+
+
+def _group_rows_by_date(all_rows: List[List[str]]) -> Dict[str, Dict[int, Dict]]:
+    """Group sheet rows by trading date, keyed by poke number.
+
+    Returns {date_str: {poke_num: {signal, overnight_move, sent_to_gpt, ...}}}.
+    Only includes dates where at least one poke has outcome data.
+    """
+    date_groups: Dict[str, Dict[int, Dict]] = {}
+
+    for row in all_rows[1:]:
+        while len(row) <= COL_OUTCOME_CORRECT:
+            row.append("")
+
+        timestamp = row[COL_TIMESTAMP]
+        if not timestamp:
+            continue
+
+        dt = _parse_signal_date(timestamp)
+        if dt is None:
+            continue
+        date_key = dt.strftime('%Y-%m-%d')
+
+        poke_str = row[COL_POKE_NUMBER]
+        try:
+            poke_num = int(poke_str)
+        except (ValueError, TypeError):
+            poke_num = 1
+
+        signal = row[COL_SIGNAL]
+        if not signal:
+            continue
+
+        overnight_str = row[COL_OVERNIGHT_MOVE]
+        try:
+            overnight = float(overnight_str.replace('%', '').replace('+', ''))
+        except (ValueError, TypeError):
+            overnight = None
+
+        sent_to_gpt_str = row[COL_SENT_TO_GPT] if len(row) > COL_SENT_TO_GPT else ""
+        try:
+            sent_to_gpt = int(sent_to_gpt_str)
+        except (ValueError, TypeError):
+            sent_to_gpt = None
+
+        if date_key not in date_groups:
+            date_groups[date_key] = {}
+
+        date_groups[date_key][poke_num] = {
+            'signal': signal,
+            'overnight_move': overnight,
+            'sent_to_gpt': sent_to_gpt,
+            'outcome': row[COL_OUTCOME_CORRECT],
+        }
+
+    return date_groups
+
+
 def _connect_sheet():
     """Connect to Google Sheet. Returns worksheet or None."""
     try:
@@ -454,6 +530,126 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
     return results
 
 
+def _print_poke_stability(all_rows: List[List[str]]) -> None:
+    """Print poke stability analysis comparing validation pokes to the decision poke.
+
+    Poke 1 (decision poke): fires the webhook at 1:32 PM ET.
+    Poke 2/3 (validation pokes): run at 1:40/1:50 PM ET for comparison only.
+
+    This section answers: "If we had waited, would we have made a better decision?"
+    """
+    date_groups = _group_rows_by_date(all_rows)
+
+    # Only analyze dates with multiple pokes AND outcome data
+    multi_poke_dates = {}
+    for date_key, pokes in date_groups.items():
+        if len(pokes) < 2 or 1 not in pokes:
+            continue
+        # Need outcome data (overnight move) from at least poke 1
+        if pokes[1].get('overnight_move') is None:
+            continue
+        multi_poke_dates[date_key] = pokes
+
+    if not multi_poke_dates:
+        print(f"\n  {'─' * 50}")
+        print(f"  POKE STABILITY ANALYSIS")
+        print(f"  {'─' * 50}")
+        print(f"    No multi-poke dates with outcome data yet.")
+        print(f"    (Need poke 1 + at least one validation poke with backfilled outcomes)")
+        return
+
+    # Metrics
+    total_dates = len(multi_poke_dates)
+    all_agree = 0          # all pokes produced the same signal tier
+    poke1_better = 0       # poke 1 made the better call
+    later_better = 0       # a later poke would have been better
+    same_outcome = 0       # both would have been equally correct/wrong
+    signal_changes = []    # track what changed and when
+
+    for date_key in sorted(multi_poke_dates):
+        pokes = multi_poke_dates[date_key]
+        p1 = pokes[1]
+        overnight = p1['overnight_move']
+
+        # Get all signals for this date
+        signals = {num: p['signal'] for num, p in pokes.items()}
+        unique_signals = set(signals.values())
+
+        if len(unique_signals) == 1:
+            all_agree += 1
+            same_outcome += 1
+            continue
+
+        # Signals disagree — evaluate which was better
+        p1_result = _hypothetical_outcome(p1['signal'], overnight)
+
+        # Check the latest validation poke (prefer 3 over 2)
+        latest_poke_num = max(num for num in pokes if num > 1)
+        vp = pokes[latest_poke_num]
+        vp_result = _hypothetical_outcome(vp['signal'], overnight)
+
+        if p1_result == vp_result:
+            same_outcome += 1
+        elif p1_result == 'CORRECT':
+            poke1_better += 1
+        else:
+            later_better += 1
+
+        # Track the change for detailed output
+        article_change = ""
+        if p1.get('sent_to_gpt') is not None and vp.get('sent_to_gpt') is not None:
+            diff = vp['sent_to_gpt'] - p1['sent_to_gpt']
+            if diff != 0:
+                article_change = f" (articles: {p1['sent_to_gpt']}→{vp['sent_to_gpt']})"
+
+        signal_changes.append({
+            'date': date_key,
+            'poke1_signal': p1['signal'],
+            'later_signal': vp['signal'],
+            'later_poke': latest_poke_num,
+            'overnight': overnight,
+            'poke1_result': p1_result,
+            'later_result': vp_result,
+            'article_change': article_change,
+        })
+
+    # Print section
+    print(f"\n  {'─' * 50}")
+    print(f"  POKE STABILITY ANALYSIS ({total_dates} nights with 2+ pokes)")
+    print(f"  {'─' * 50}")
+
+    stability_pct = all_agree / total_dates * 100 if total_dates else 0
+    print(f"  Signal stability: {all_agree}/{total_dates} nights all pokes agree ({stability_pct:.0f}%)")
+
+    disagreements = total_dates - all_agree
+    if disagreements > 0:
+        print(f"  Disagreements: {disagreements} nights")
+        print(f"    Poke 1 was better:     {poke1_better} ({poke1_better/disagreements*100:.0f}%)")
+        print(f"    Later poke was better: {later_better} ({later_better/disagreements*100:.0f}%)")
+        print(f"    Same outcome either way: {same_outcome - all_agree} ({(same_outcome - all_agree)/disagreements*100:.0f}%)")
+
+        if later_better > poke1_better:
+            print(f"\n    ** Later pokes are consistently better — consider delaying the decision poke **")
+        elif poke1_better > later_better:
+            print(f"\n    ** Poke 1 timing is good — later news doesn't improve decisions **")
+
+    # Show individual disagreements
+    changes_only = [c for c in signal_changes if c['poke1_signal'] != c['later_signal']]
+    if changes_only:
+        print(f"\n    Signal changes:")
+        for c in changes_only:
+            arrow = "→"
+            verdict = ""
+            if c['poke1_result'] != c['later_result']:
+                winner = "Poke 1" if c['poke1_result'] == 'CORRECT' else f"Poke {c['later_poke']}"
+                verdict = f" [{winner} was right]"
+            else:
+                verdict = f" [same outcome]"
+            move_str = f"{c['overnight']:.4f}"
+            print(f"      {c['date']}: {c['poke1_signal']} {arrow} {c['later_signal']}"
+                  f" (move={move_str}%){c['article_change']}{verdict}")
+
+
 def print_accuracy_report(results: Optional[List[Dict]] = None):
     """Print a signal accuracy report from Sheet data."""
     ws = _connect_sheet()
@@ -596,6 +792,9 @@ def print_accuracy_report(results: Optional[List[Dict]] = None):
         n = sum(1 for o in all_outcomes if o['signal'] == tier)
         pct = n / total * 100 if total else 0
         print(f"    {tier}: {n} ({pct:.0f}%)")
+
+    # ── Poke stability analysis ──
+    _print_poke_stability(all_rows)
 
     print("\n" + "=" * 70)
 

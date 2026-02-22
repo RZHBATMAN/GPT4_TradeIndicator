@@ -49,7 +49,7 @@ IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
 # Option Alpha VIX gate: OA will not open positions when VIX >= this value
 OA_VIX_GATE = 25
 
-_daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None}
+_daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None, 'poke_count': 0}
 TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
 POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
@@ -505,9 +505,13 @@ def option_alpha_trigger():
             _daily_signal_cache['webhook_sent'] = False
             _daily_signal_cache['signal'] = None
             _daily_signal_cache['score'] = None
+            _daily_signal_cache['poke_count'] = 0
+
+        _daily_signal_cache['poke_count'] += 1
+        poke_number = _daily_signal_cache['poke_count']
 
         # Final Signal
-        print(f"\n[{timestamp}] ========== FINAL SIGNAL ==========")
+        print(f"\n[{timestamp}] ========== FINAL SIGNAL (Poke #{poke_number}) ==========")
         print(f"[{timestamp}] Signal: {signal['signal']}")
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
@@ -580,6 +584,7 @@ def option_alpha_trigger():
             contradictions=contradictions,
             vix_current=vix_current,
             trade_executed=trade_executed,
+            poke_number=poke_number,
         )
 
         # Record successful signal for alerting

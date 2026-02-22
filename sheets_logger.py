@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # Header row for the signal log sheet (same order as row values)
 SHEET_HEADERS = [
     "Timestamp_ET",
+    "Poke_Number",
     "Signal",
     "Should_Trade",
     "Reason",
@@ -133,6 +134,7 @@ def log_signal(
     contradictions: Optional[Dict[str, Any]] = None,
     vix_current: Optional[float] = None,
     trade_executed: str = "",
+    poke_number: int = 1,
 ) -> None:
     """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
     print("[Sheets] log_signal called")
@@ -158,6 +160,7 @@ def log_signal(
 
         row: List[Any] = [
             timestamp,
+            poke_number,
             signal.get("signal", ""),
             signal.get("should_trade", False),
             signal.get("reason", ""),

@@ -96,6 +96,104 @@ Running two OA bots (paper + live each) side by side to test different exit sett
 
 ---
 
+## Future Edge Exploration (After Core Is Validated)
+
+These are potential signal enhancements to explore once the current system has 2-3 months of data and the core signal is proven stable. Ordered by estimated impact and implementation difficulty.
+
+### Explore: VVIX as a second-order risk filter
+
+VIX tells you how much SPX is expected to move. VVIX tells you how much *VIX itself* is expected to move. High VVIX (>120) means vol-of-vol is elevated — even if VIX looks calm at 16, it could spike to 25 overnight. Your iron condor's short strikes get destroyed by vol expansion, not just by SPX moving.
+
+**Why this matters for overnight condors:** You enter at 2 PM and hold through the night. VVIX captures the risk of a VIX gap-up on the open (e.g., geopolitical news overnight), which IV/RV ratio alone doesn't see.
+
+**What to do:**
+- Add VVIX fetch from Polygon (`I:VVIX`) alongside existing VIX data
+- Track VVIX in Sheets for 1 month alongside outcomes
+- If WRONG_TRADE correlates with VVIX > 120 → add as a modifier to IV/RV score (e.g., +2 when VVIX > 120)
+- Could also serve as a hard gate (like VIX >= 25 gate) at extreme levels (VVIX > 140)
+
+**Data:** Available from Polygon on same plan (`I:VVIX` snapshot)
+**File:** `data/market_data.py`, `signals/iv_rv_ratio.py`
+
+---
+
+### Explore: Overnight-specific vol decomposition (close-to-open vs open-to-close)
+
+Your IV/RV ratio uses daily close-to-close returns to calculate RV. But your actual exposure is overnight only (2 PM → 10 AM). Daily RV includes the intraday session, which is irrelevant to your P&L.
+
+**The insight:** If you decompose returns into close-to-open (overnight) and open-to-close (intraday), you can calculate an overnight-specific RV. If IV is rich relative to *overnight* RV specifically — not daily RV — that's a stronger signal for your strategy.
+
+**What to do:**
+- Fetch daily bars from Polygon (already available) — open and close prices
+- Calculate overnight RV: std(log(open_t / close_t-1)) * sqrt(252) * 100
+- Compare IV/overnight_RV ratio vs IV/daily_RV ratio as predictors
+- If overnight-specific ratio has better CORRECT_TRADE correlation → replace current RV calculation
+
+**Data:** Already available (Polygon daily bars have open + close)
+**File:** `signals/iv_rv_ratio.py`
+
+---
+
+### Explore: VRP trend (expanding vs compressing)
+
+The current IV/RV ratio is a snapshot — it tells you if vol is rich *right now*. But the *direction* matters: is the premium expanding (getting richer = better entry) or compressing (edge shrinking = be cautious)?
+
+**What to do:**
+- Track 5-day rolling IV/RV ratio (already have the data, just need the rolling window)
+- If today's ratio > 5-day average → VRP expanding → slight positive modifier
+- If today's ratio < 5-day average → VRP compressing → slight negative modifier
+- This is a refinement to the existing IV/RV indicator, not a new indicator
+
+**Data:** Derived from existing IV/RV history
+**File:** `signals/iv_rv_ratio.py`
+
+---
+
+### Explore: Cross-asset regime detection (TNX, DXY)
+
+SPX VIX alone doesn't distinguish between risk regimes. A selloff caused by rising rates (TNX up + SPX down) behaves differently overnight than a selloff caused by growth fears (TNX down + SPX down). Rate-driven selloffs often stabilize overnight; growth scares tend to cascade.
+
+**What to do:**
+- Add TNX (10Y yield) and optionally DXY (dollar index) from Polygon
+- Define simple regime flags: "risk-off" (TNX down + SPX down), "rate-shock" (TNX up + SPX down), "calm" (low moves in both)
+- Feed as a modifier to trend score or GPT prompt context
+- Analyze: do specific regimes correlate with higher WRONG_TRADE rates?
+
+**Data:** Available from Polygon (`I:TNX`, `I:DXY`)
+**File:** `data/market_data.py`, `signals/market_trend.py`
+
+---
+
+### Explore: Realized gap vs implied gap tracking (edge decay monitor)
+
+The entire strategy's edge rests on the premise that implied overnight vol consistently overestimates realized overnight moves. If this gap narrows over time (more overnight sellers = less premium), the edge erodes.
+
+**What to do:**
+- For each trading day, compute: implied overnight move (from VIX1D) vs actual overnight move (SPX close → next open)
+- Track a rolling ratio of implied/realized gap over 30 days
+- If the ratio trends toward 1.0 → the edge is compressing → consider pausing or tightening tiers
+- This is a meta-signal about the strategy itself, not a trade signal
+
+**Data:** Already have both sides (VIX1D in Sheets, overnight move in validate_outcomes)
+**File:** `validate_outcomes.py` (add to accuracy report)
+
+---
+
+### Explore: ES futures overnight monitoring for early exit
+
+OA exits at 10 AM ET or on profit/stop triggers. But you have no visibility into the overnight session between 4 PM and 9:30 AM. ES futures (E-mini S&P 500) trade nearly 24 hours and track SPX.
+
+**What to do:**
+- Set up a lightweight monitor that checks ES futures at midnight and 6 AM ET
+- If |ES move from SPX close| > 0.60% → send Slack alert (potential blown condor)
+- Future: if OA supports API-triggered closes, auto-close when ES breaches breakeven threshold
+- This doesn't change the signal — it's a risk management layer between entry and exit
+
+**Data:** ES futures via Polygon or a free futures API
+**Complexity:** New service (separate cron job), not part of the signal engine
+
+---
+
 ## Completed
 
 - ~~Reduce GPT non-determinism~~ — temperature 0.3 → 0.1, plus confirmation pass

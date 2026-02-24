@@ -1,8 +1,8 @@
 """Tests for validate_outcomes.py poke stability analysis.
 
-Tests the helper functions that compare validation pokes (2, 3) against
-the decision poke (1) to measure signal stability and identify whether
-delaying the decision would produce better outcomes.
+Tests the helper functions that compare later signals against the
+decision signal (first by timestamp) to measure signal stability and
+identify whether delaying the decision would produce better outcomes.
 
 Run: python -m pytest tests/test_validate_outcomes.py -v
 """
@@ -127,8 +127,8 @@ def _build_row(timestamp, poke_num, signal, overnight_move="", outcome="",
 class TestGroupRowsByDate:
     """Test date grouping for poke stability analysis."""
 
-    def test_single_date_multiple_pokes(self):
-        """Three pokes on the same date grouped correctly."""
+    def test_single_date_multiple_signals(self):
+        """Three signals on the same date grouped and sorted by timestamp."""
         header = [""] * (COL_OUTCOME_CORRECT + 1)
         rows = [
             header,
@@ -139,8 +139,10 @@ class TestGroupRowsByDate:
         groups = _group_rows_by_date(rows)
         assert "2025-02-10" in groups
         assert len(groups["2025-02-10"]) == 3
-        assert groups["2025-02-10"][1]['signal'] == 'TRADE_NORMAL'
-        assert groups["2025-02-10"][3]['signal'] == 'TRADE_CONSERVATIVE'
+        # First by timestamp = decision signal
+        assert groups["2025-02-10"][0]['signal'] == 'TRADE_NORMAL'
+        # Last by timestamp = latest validation
+        assert groups["2025-02-10"][2]['signal'] == 'TRADE_CONSERVATIVE'
 
     def test_multiple_dates(self):
         """Different dates are grouped separately."""
@@ -163,7 +165,7 @@ class TestGroupRowsByDate:
             _build_row("2025-02-10 01:32:00 PM ET", 1, "TRADE_NORMAL", "+0.4500%", "CORRECT_TRADE"),
         ]
         groups = _group_rows_by_date(rows)
-        assert groups["2025-02-10"][1]['overnight_move'] == pytest.approx(0.45)
+        assert groups["2025-02-10"][0]['overnight_move'] == pytest.approx(0.45)
 
     def test_missing_overnight_move(self):
         """Row without overnight move data has None."""
@@ -173,7 +175,7 @@ class TestGroupRowsByDate:
             _build_row("2025-02-10 01:32:00 PM ET", 1, "TRADE_NORMAL"),
         ]
         groups = _group_rows_by_date(rows)
-        assert groups["2025-02-10"][1]['overnight_move'] is None
+        assert groups["2025-02-10"][0]['overnight_move'] is None
 
     def test_empty_rows_skipped(self):
         """Rows with no timestamp or signal are skipped."""
@@ -197,17 +199,46 @@ class TestGroupRowsByDate:
                         "+0.45%", "WRONG_SKIP", sent_to_gpt="8"),
         ]
         groups = _group_rows_by_date(rows)
-        assert groups["2025-02-10"][1]['sent_to_gpt'] == 5
-        assert groups["2025-02-10"][3]['sent_to_gpt'] == 8
+        # First by timestamp
+        assert groups["2025-02-10"][0]['sent_to_gpt'] == 5
+        # Second by timestamp
+        assert groups["2025-02-10"][1]['sent_to_gpt'] == 8
 
-    def test_poke_number_default_for_legacy(self):
-        """Legacy rows without poke number default to poke 1."""
+    def test_duplicate_poke_numbers_both_kept(self):
+        """Local runs with duplicate poke_number=1 are both kept and ordered by time."""
+        header = [""] * (COL_OUTCOME_CORRECT + 1)
+        rows = [
+            header,
+            _build_row("2025-02-10 01:32:00 PM ET", 1, "TRADE_NORMAL", "+0.45%", "CORRECT_TRADE"),
+            _build_row("2025-02-10 01:50:00 PM ET", 1, "SKIP", "+0.45%", "WRONG_SKIP"),
+        ]
+        groups = _group_rows_by_date(rows)
+        assert len(groups["2025-02-10"]) == 2
+        assert groups["2025-02-10"][0]['signal'] == 'TRADE_NORMAL'
+        assert groups["2025-02-10"][1]['signal'] == 'SKIP'
+
+    def test_timestamp_ordering_not_insertion_order(self):
+        """Rows inserted out of order are still sorted by timestamp."""
+        header = [""] * (COL_OUTCOME_CORRECT + 1)
+        rows = [
+            header,
+            _build_row("2025-02-10 01:50:00 PM ET", 3, "SKIP", "+0.45%", "WRONG_SKIP"),
+            _build_row("2025-02-10 01:32:00 PM ET", 1, "TRADE_NORMAL", "+0.45%", "CORRECT_TRADE"),
+        ]
+        groups = _group_rows_by_date(rows)
+        # Earlier timestamp comes first regardless of row order
+        assert groups["2025-02-10"][0]['signal'] == 'TRADE_NORMAL'
+        assert groups["2025-02-10"][1]['signal'] == 'SKIP'
+
+    def test_legacy_row_without_poke_number(self):
+        """Legacy rows without poke number are still grouped by timestamp."""
         header = [""] * (COL_OUTCOME_CORRECT + 1)
         row = _build_row("2025-02-10 01:32:00 PM ET", "", "TRADE_NORMAL", "+0.45%", "CORRECT_TRADE")
         row[COL_POKE_NUMBER] = ""  # simulate legacy
         rows = [header, row]
         groups = _group_rows_by_date(rows)
-        assert 1 in groups["2025-02-10"]
+        assert len(groups["2025-02-10"]) == 1
+        assert groups["2025-02-10"][0]['signal'] == 'TRADE_NORMAL'
 
 
 # ── Integration: Poke Comparison Scenarios ─────────────────────────────

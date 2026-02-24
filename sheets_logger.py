@@ -101,19 +101,19 @@ def _client_and_sheet():
 
 
 def _ensure_header(ws) -> None:
-    """Insert header row if missing, or update it if columns were added since last run."""
+    """Ensure header row matches SHEET_HEADERS exactly; replace if any mismatch."""
     try:
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != SHEET_HEADERS[0]:
             ws.insert_row(SHEET_HEADERS, 1)
             print("[Sheets] Header row inserted (first run)")
-        elif len(first_row) < len(SHEET_HEADERS):
-            # Header exists but is shorter than current SHEET_HEADERS — patch missing columns
-            missing = SHEET_HEADERS[len(first_row):]
-            start_col = len(first_row) + 1  # 1-indexed
-            for i, hdr in enumerate(missing):
-                ws.update_cell(1, start_col + i, hdr)
-            print(f"[Sheets] Header row extended: added {len(missing)} new columns ({', '.join(missing)})")
+        elif first_row[:len(SHEET_HEADERS)] != SHEET_HEADERS:
+            # Header exists but doesn't match (wrong order, missing/extra columns, etc.)
+            # Overwrite the entire header row to match current schema
+            ws.update('A1', [SHEET_HEADERS], value_input_option='RAW')
+            print(f"[Sheets] Header row replaced to match current schema ({len(SHEET_HEADERS)} columns)")
+        else:
+            print("[Sheets] Header row OK")
     except Exception as e:
         print(f"[Sheets] Could not ensure header row: {e}")
         logger.warning("Could not ensure header row: %s", e)

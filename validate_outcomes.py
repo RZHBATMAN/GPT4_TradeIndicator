@@ -325,13 +325,16 @@ def _hypothetical_outcome(signal: str, overnight_move_pct: float) -> str:
     return 'CORRECT' if overnight_move_pct < threshold else 'WRONG'
 
 
-def _group_rows_by_date(all_rows: List[List[str]]) -> Dict[str, Dict[int, Dict]]:
-    """Group sheet rows by trading date, keyed by poke number.
+def _group_rows_by_date(all_rows: List[List[str]]) -> Dict[str, List[Dict]]:
+    """Group sheet rows by trading date, ordered by timestamp.
 
-    Returns {date_str: {poke_num: {signal, overnight_move, sent_to_gpt, ...}}}.
-    Only includes dates where at least one poke has outcome data.
+    Returns {date_str: [list of entry dicts sorted by timestamp]}.
+    The first entry in each list is the decision signal (earliest in the
+    trading window), regardless of poke_number.  This makes the grouping
+    robust to local runs where poke_number resets to 1 each time.
     """
-    date_groups: Dict[str, Dict[int, Dict]] = {}
+    # Collect rows per date with their parsed datetime for sorting
+    date_rows: Dict[str, List[Tuple[datetime, Dict]]] = {}
 
     for row in all_rows[1:]:
         while len(row) <= COL_OUTCOME_CORRECT:
@@ -345,12 +348,6 @@ def _group_rows_by_date(all_rows: List[List[str]]) -> Dict[str, Dict[int, Dict]]
         if dt is None:
             continue
         date_key = dt.strftime('%Y-%m-%d')
-
-        poke_str = row[COL_POKE_NUMBER]
-        try:
-            poke_num = int(poke_str)
-        except (ValueError, TypeError):
-            poke_num = 1
 
         signal = row[COL_SIGNAL]
         if not signal:
@@ -368,15 +365,23 @@ def _group_rows_by_date(all_rows: List[List[str]]) -> Dict[str, Dict[int, Dict]]
         except (ValueError, TypeError):
             sent_to_gpt = None
 
-        if date_key not in date_groups:
-            date_groups[date_key] = {}
-
-        date_groups[date_key][poke_num] = {
+        entry = {
             'signal': signal,
             'overnight_move': overnight,
             'sent_to_gpt': sent_to_gpt,
             'outcome': row[COL_OUTCOME_CORRECT],
+            'timestamp': timestamp,
         }
+
+        if date_key not in date_rows:
+            date_rows[date_key] = []
+        date_rows[date_key].append((dt, entry))
+
+    # Sort each date's entries by timestamp; first = decision signal
+    date_groups: Dict[str, List[Dict]] = {}
+    for date_key, entries in date_rows.items():
+        entries.sort(key=lambda x: x[0])
+        date_groups[date_key] = [e for _, e in entries]
 
     return date_groups
 
@@ -531,122 +536,123 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
 
 
 def _print_poke_stability(all_rows: List[List[str]]) -> None:
-    """Print poke stability analysis comparing validation pokes to the decision poke.
+    """Print poke stability analysis comparing later signals to the decision signal.
 
-    Poke 1 (decision poke): fires the webhook at 1:32 PM ET.
-    Poke 2/3 (validation pokes): run at 1:40/1:50 PM ET for comparison only.
+    Decision signal: the first signal logged in the trading window (by timestamp).
+    Validation signals: any subsequent signals on the same date.
+
+    Uses timestamp ordering (not poke_number) so local runs where
+    poke_number resets to 1 are handled correctly.
 
     This section answers: "If we had waited, would we have made a better decision?"
     """
     date_groups = _group_rows_by_date(all_rows)
 
-    # Only analyze dates with multiple pokes AND outcome data
-    multi_poke_dates = {}
-    for date_key, pokes in date_groups.items():
-        if len(pokes) < 2 or 1 not in pokes:
+    # Only analyze dates with multiple signals AND outcome data
+    multi_signal_dates = {}
+    for date_key, signals in date_groups.items():
+        if len(signals) < 2:
             continue
-        # Need outcome data (overnight move) from at least poke 1
-        if pokes[1].get('overnight_move') is None:
+        # Need outcome data (overnight move) from the decision signal
+        if signals[0].get('overnight_move') is None:
             continue
-        multi_poke_dates[date_key] = pokes
+        multi_signal_dates[date_key] = signals
 
-    if not multi_poke_dates:
+    if not multi_signal_dates:
         print(f"\n  {'─' * 50}")
         print(f"  POKE STABILITY ANALYSIS")
         print(f"  {'─' * 50}")
-        print(f"    No multi-poke dates with outcome data yet.")
-        print(f"    (Need poke 1 + at least one validation poke with backfilled outcomes)")
+        print(f"    No multi-signal dates with outcome data yet.")
+        print(f"    (Need decision signal + at least one later signal with backfilled outcomes)")
         return
 
     # Metrics
-    total_dates = len(multi_poke_dates)
-    all_agree = 0          # all pokes produced the same signal tier
-    poke1_better = 0       # poke 1 made the better call
-    later_better = 0       # a later poke would have been better
+    total_dates = len(multi_signal_dates)
+    all_agree = 0          # all signals produced the same tier
+    first_better = 0       # first signal made the better call
+    later_better = 0       # a later signal would have been better
     same_outcome = 0       # both would have been equally correct/wrong
     signal_changes = []    # track what changed and when
 
-    for date_key in sorted(multi_poke_dates):
-        pokes = multi_poke_dates[date_key]
-        p1 = pokes[1]
-        overnight = p1['overnight_move']
+    for date_key in sorted(multi_signal_dates):
+        signals = multi_signal_dates[date_key]
+        decision = signals[0]   # first by timestamp = the actual trade
+        overnight = decision['overnight_move']
 
-        # Get all signals for this date
-        signals = {num: p['signal'] for num, p in pokes.items()}
-        unique_signals = set(signals.values())
+        # Get all signal tiers for this date
+        all_tiers = [s['signal'] for s in signals]
+        unique_tiers = set(all_tiers)
 
-        if len(unique_signals) == 1:
+        if len(unique_tiers) == 1:
             all_agree += 1
             same_outcome += 1
             continue
 
         # Signals disagree — evaluate which was better
-        p1_result = _hypothetical_outcome(p1['signal'], overnight)
+        decision_result = _hypothetical_outcome(decision['signal'], overnight)
 
-        # Check the latest validation poke (prefer 3 over 2)
-        latest_poke_num = max(num for num in pokes if num > 1)
-        vp = pokes[latest_poke_num]
-        vp_result = _hypothetical_outcome(vp['signal'], overnight)
+        # Compare against the latest validation signal
+        latest = signals[-1]
+        latest_result = _hypothetical_outcome(latest['signal'], overnight)
 
-        if p1_result == vp_result:
+        if decision_result == latest_result:
             same_outcome += 1
-        elif p1_result == 'CORRECT':
-            poke1_better += 1
+        elif decision_result == 'CORRECT':
+            first_better += 1
         else:
             later_better += 1
 
         # Track the change for detailed output
         article_change = ""
-        if p1.get('sent_to_gpt') is not None and vp.get('sent_to_gpt') is not None:
-            diff = vp['sent_to_gpt'] - p1['sent_to_gpt']
+        if decision.get('sent_to_gpt') is not None and latest.get('sent_to_gpt') is not None:
+            diff = latest['sent_to_gpt'] - decision['sent_to_gpt']
             if diff != 0:
-                article_change = f" (articles: {p1['sent_to_gpt']}→{vp['sent_to_gpt']})"
+                article_change = f" (articles: {decision['sent_to_gpt']}→{latest['sent_to_gpt']})"
 
         signal_changes.append({
             'date': date_key,
-            'poke1_signal': p1['signal'],
-            'later_signal': vp['signal'],
-            'later_poke': latest_poke_num,
+            'first_signal': decision['signal'],
+            'later_signal': latest['signal'],
             'overnight': overnight,
-            'poke1_result': p1_result,
-            'later_result': vp_result,
+            'first_result': decision_result,
+            'later_result': latest_result,
             'article_change': article_change,
         })
 
     # Print section
     print(f"\n  {'─' * 50}")
-    print(f"  POKE STABILITY ANALYSIS ({total_dates} nights with 2+ pokes)")
+    print(f"  POKE STABILITY ANALYSIS ({total_dates} nights with 2+ signals)")
     print(f"  {'─' * 50}")
 
     stability_pct = all_agree / total_dates * 100 if total_dates else 0
-    print(f"  Signal stability: {all_agree}/{total_dates} nights all pokes agree ({stability_pct:.0f}%)")
+    print(f"  Signal stability: {all_agree}/{total_dates} nights all signals agree ({stability_pct:.0f}%)")
 
     disagreements = total_dates - all_agree
     if disagreements > 0:
         print(f"  Disagreements: {disagreements} nights")
-        print(f"    Poke 1 was better:     {poke1_better} ({poke1_better/disagreements*100:.0f}%)")
-        print(f"    Later poke was better: {later_better} ({later_better/disagreements*100:.0f}%)")
+        print(f"    First signal was better:  {first_better} ({first_better/disagreements*100:.0f}%)")
+        print(f"    Later signal was better:  {later_better} ({later_better/disagreements*100:.0f}%)")
         print(f"    Same outcome either way: {same_outcome - all_agree} ({(same_outcome - all_agree)/disagreements*100:.0f}%)")
 
-        if later_better > poke1_better:
-            print(f"\n    ** Later pokes are consistently better — consider delaying the decision poke **")
-        elif poke1_better > later_better:
-            print(f"\n    ** Poke 1 timing is good — later news doesn't improve decisions **")
+        if later_better > first_better:
+            print(f"\n    ** Later signals are consistently better — consider delaying the decision **")
+        elif first_better > later_better:
+            print(f"\n    ** First signal timing is good — later news doesn't improve decisions **")
 
     # Show individual disagreements
-    changes_only = [c for c in signal_changes if c['poke1_signal'] != c['later_signal']]
+    changes_only = [c for c in signal_changes if c['first_signal'] != c['later_signal']]
     if changes_only:
         print(f"\n    Signal changes:")
         for c in changes_only:
             arrow = "→"
             verdict = ""
-            if c['poke1_result'] != c['later_result']:
-                winner = "Poke 1" if c['poke1_result'] == 'CORRECT' else f"Poke {c['later_poke']}"
+            if c['first_result'] != c['later_result']:
+                winner = "1st signal" if c['first_result'] == 'CORRECT' else "Later signal"
                 verdict = f" [{winner} was right]"
             else:
                 verdict = f" [same outcome]"
             move_str = f"{c['overnight']:.4f}"
-            print(f"      {c['date']}: {c['poke1_signal']} {arrow} {c['later_signal']}"
+            print(f"      {c['date']}: {c['first_signal']} {arrow} {c['later_signal']}"
                   f" (move={move_str}%){c['article_change']}{verdict}")
 
 

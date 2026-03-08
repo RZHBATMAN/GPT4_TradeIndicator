@@ -36,6 +36,9 @@ SHEET_HEADERS = [
     "Raw_Articles",
     "Sent_To_GPT",
     "GPT_Reasoning",
+    # GPT cost tracking
+    "GPT_Tokens",
+    "GPT_Cost",
     # Contradiction detection
     "Contradiction_Flags",
     "Override_Applied",
@@ -182,6 +185,9 @@ def log_signal(
             filter_stats.get("raw_articles", ""),
             filter_stats.get("sent_to_gpt", ""),
             reasoning,
+            # GPT cost columns
+            gpt.get("token_usage", {}).get("total", ""),
+            f"${gpt.get('token_usage', {}).get('cost', 0):.4f}" if gpt.get("token_usage", {}).get("cost") else "",
             # Contradiction columns
             flags_str,
             override,

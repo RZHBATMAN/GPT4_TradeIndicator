@@ -462,11 +462,13 @@ def option_alpha_trigger():
         # a second time and use the MORE CONSERVATIVE of the two results.
         # This costs one extra OpenAI call but prevents the worst case:
         # a lucky low GPT score triggering an aggressive trade.
+        # The confirmation pass uses temperature=0.4 (vs 0.1 for primary)
+        # to genuinely test score robustness against sampling variance.
         print(f"\n[{timestamp}] ========== CONFIRMATION PASS ==========")
-        print(f"[{timestamp}] Running second analysis for signal confirmation...")
-        time_module.sleep(2)  # brief delay so GPT sees slightly different state
+        print(f"[{timestamp}] Running second analysis for signal confirmation (temp=0.4)...")
+        time_module.sleep(2)  # brief delay between API calls
 
-        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
+        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data, gpt_temperature=0.4)
         composite_2 = analysis_result_2['composite']
         signal_2 = analysis_result_2['signal']
         contradictions_2 = analysis_result_2.get('contradictions')
@@ -536,16 +538,33 @@ def option_alpha_trigger():
             print(f"[{timestamp}] Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
             webhook = {'success': True, 'skipped': True}
         else:
-            # First signal of the day — fire webhook
+            # First signal of the day — fire webhook (with retry)
             webhook = send_webhook(signal)
-            _daily_signal_cache['webhook_sent'] = True
-            _daily_signal_cache['signal'] = signal['signal']
-            _daily_signal_cache['score'] = composite['score']
-            print(f"[{timestamp}] Webhook fired: {signal['signal']}")
+
+            if webhook.get('success'):
+                _daily_signal_cache['webhook_sent'] = True
+                _daily_signal_cache['signal'] = signal['signal']
+                _daily_signal_cache['score'] = composite['score']
+                print(f"[{timestamp}] Webhook fired: {signal['signal']} (attempts: {webhook.get('attempts', 1)})")
+            else:
+                # Webhook failed after all retries — alert and do NOT mark as sent
+                # so the next poke will retry
+                error_msg = webhook.get('error', 'Unknown error')
+                print(f"[{timestamp}] WEBHOOK FAILED after {webhook.get('attempts', 0)} attempts: {error_msg}")
+                from alerting import _send_alert
+                _send_alert(
+                    "Webhook Failed",
+                    f"Signal {signal['signal']} (score={composite['score']:.1f}) webhook failed "
+                    f"after {webhook.get('attempts', 0)} retries. Error: {error_msg}. "
+                    f"Next poke will retry.",
+                    level='critical',
+                )
 
             # Determine actual trade execution status — check all OA gates
             if signal['signal'] == 'SKIP':
                 trade_executed = "NO_SKIP"
+            elif not webhook.get('success'):
+                trade_executed = f"NO_WEBHOOK_FAIL ({webhook.get('error', 'unknown')[:40]})"
             elif vix_blocked:
                 trade_executed = f"NO_VIX_GATE (VIX={vix_current:.1f})"
                 print(f"[{timestamp}] VIX={vix_current:.1f} >= {OA_VIX_GATE} — OA will block this trade")

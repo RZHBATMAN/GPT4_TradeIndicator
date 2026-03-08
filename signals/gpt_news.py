@@ -8,8 +8,14 @@ from config.loader import get_config
 ET_TZ = pytz.timezone('US/Eastern')
 
 
-def analyze_gpt_news(news_data):
-    """LAYER 3: GPT analysis with significance-based time decay model"""
+def analyze_gpt_news(news_data, temperature=0.1):
+    """LAYER 3: GPT analysis with significance-based time decay model.
+
+    Args:
+        news_data: Processed news pipeline output.
+        temperature: OpenAI sampling temperature. Default 0.1 for primary pass.
+            Confirmation pass uses 0.4 to test score robustness.
+    """
 
     if news_data['count'] == 0:
         print("\n[LAYER 3] GPT ANALYSIS: Skipped (no news) — defaulting to ELEVATED")
@@ -36,8 +42,8 @@ def analyze_gpt_news(news_data):
 CURRENT TIME: {current_time_str}
 
 CONTEXT:
-- Selling SPX iron condor NOW (2:30-3:30 PM entry)
-- Holding OVERNIGHT (~16 hours until 9:30 AM tomorrow)
+- Selling SPX iron condor NOW (1:30-2:30 PM ET entry)
+- Holding OVERNIGHT (~19.5-20.5 hours until 10:00 AM ET tomorrow)
 - Iron condor LOSES MONEY from BIG MOVES in EITHER DIRECTION
 
 ⚠️ TRIPLE-LAYER FILTERING SYSTEM:
@@ -229,7 +235,8 @@ Respond in JSON only (no markdown):
 }}
 """
 
-    print(f"\n[LAYER 3] GPT ANALYSIS: Calling OpenAI ({openai_model}) with significance-time decay model...")
+    temp_label = f", temp={temperature}" if temperature != 0.1 else ""
+    print(f"\n[LAYER 3] GPT ANALYSIS: Calling OpenAI ({openai_model}{temp_label}) with significance-time decay model...")
 
     try:
         headers = {
@@ -241,7 +248,7 @@ Respond in JSON only (no markdown):
             "model": openai_model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1000,
-            "temperature": 0.1
+            "temperature": temperature
         }
 
         response = requests.post(

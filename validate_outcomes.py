@@ -50,6 +50,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+import gspread
 import requests
 import pytz
 
@@ -100,9 +101,6 @@ MOVE_THRESHOLDS = {
 # Threshold for "was not trading correct?" — if move >= this, not trading was right
 NO_TRADE_THRESHOLD = 0.80
 
-# Columns used for poke stability analysis
-COL_SENT_TO_GPT = 21
-
 # Column indices (0-based) matching SHEET_HEADERS in sheets_logger.py
 # Note: GPT_Tokens (col 23) and GPT_Cost (col 24) were added after GPT_Reasoning (col 22)
 COL_TIMESTAMP = 0
@@ -118,6 +116,38 @@ COL_SPX_NEXT_OPEN = 28
 COL_SPX_NEXT_CLOSE = 29
 COL_OVERNIGHT_MOVE = 30
 COL_OUTCOME_CORRECT = 31
+
+
+def _parse_signal_date(date_str: str) -> Optional[datetime]:
+    """Parse timestamp from Google Sheets (e.g. '2025-03-06 01:45:23 PM EST').
+
+    Tries multiple formats because the Sheets timestamp format can vary
+    depending on timezone (EST vs EDT) and how the cell is formatted.
+    """
+    for fmt in [
+        "%Y-%m-%d %I:%M:%S %p %Z",
+        "%Y-%m-%d %I:%M:%S %p EST",
+        "%Y-%m-%d %I:%M:%S %p EDT",
+        "%m/%d/%Y %I:%M:%S %p",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ]:
+        try:
+            dt = datetime.strptime(date_str.strip(), fmt)
+            if dt.tzinfo is None:
+                dt = ET_TZ.localize(dt)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _next_weekday(dt: datetime) -> datetime:
+    """Return the next weekday (skip Saturday and Sunday)."""
+    nxt = dt + timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += timedelta(days=1)
+    return nxt
 
 
 def _get_next_trading_day(date_str: str) -> str:
@@ -280,82 +310,6 @@ def _evaluate_outcome(
     return round(overnight_move_pct, 4), outcome
 
 
-def _hypothetical_outcome(signal: str, overnight_move_pct: float) -> str:
-    """Determine what the outcome WOULD have been for a given signal.
-
-    Unlike _evaluate_outcome which uses actual Trade_Executed status, this
-    evaluates purely based on the signal: if we had followed this signal,
-    would the overnight move have been within safe bounds?
-
-    Returns 'CORRECT' or 'WRONG'.
-    """
-    if signal == 'SKIP':
-        # SKIP is correct if the move was large enough to blow a condor
-        return 'CORRECT' if overnight_move_pct >= NO_TRADE_THRESHOLD else 'WRONG'
-    # TRADE_* signals: correct if the move was within the tier's breakeven
-    threshold = MOVE_THRESHOLDS.get(signal, 0.80)
-    return 'CORRECT' if overnight_move_pct < threshold else 'WRONG'
-
-
-def _group_rows_by_date(all_rows: List[List[str]]) -> Dict[str, List[Dict]]:
-    """Group sheet rows by trading date, ordered by timestamp.
-
-    Returns {date_str: [list of entry dicts sorted by timestamp]}.
-    The first entry in each list is the decision signal (earliest in the
-    trading window), regardless of poke_number.  This makes the grouping
-    robust to local runs where poke_number resets to 1 each time.
-    """
-    # Collect rows per date with their parsed datetime for sorting
-    date_rows: Dict[str, List[Tuple[datetime, Dict]]] = {}
-
-    for row in all_rows[1:]:
-        while len(row) <= COL_OUTCOME_CORRECT:
-            row.append("")
-
-        timestamp = row[COL_TIMESTAMP]
-        if not timestamp:
-            continue
-
-        dt = _parse_signal_date(timestamp)
-        if dt is None:
-            continue
-        date_key = dt.strftime('%Y-%m-%d')
-
-        signal = row[COL_SIGNAL]
-        if not signal:
-            continue
-
-        overnight_str = row[COL_OVERNIGHT_MOVE]
-        try:
-            overnight = float(overnight_str.replace('%', '').replace('+', ''))
-        except (ValueError, TypeError):
-            overnight = None
-
-        sent_to_gpt_str = row[COL_SENT_TO_GPT] if len(row) > COL_SENT_TO_GPT else ""
-        try:
-            sent_to_gpt = int(sent_to_gpt_str)
-        except (ValueError, TypeError):
-            sent_to_gpt = None
-
-        entry = {
-            'signal': signal,
-            'overnight_move': overnight,
-            'sent_to_gpt': sent_to_gpt,
-            'outcome': row[COL_OUTCOME_CORRECT],
-            'timestamp': timestamp,
-        }
-
-        if date_key not in date_rows:
-            date_rows[date_key] = []
-        date_rows[date_key].append((dt, entry))
-
-    # Sort each date's entries by timestamp; first = decision signal
-    date_groups: Dict[str, List[Dict]] = {}
-    for date_key, entries in date_rows.items():
-        entries.sort(key=lambda x: x[0])
-        date_groups[date_key] = [e for _, e in entries]
-
-    return date_groups
 
 
 def _connect_sheet():
@@ -404,6 +358,7 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
     header = all_rows[0]
     results = []
     updates_made = 0
+    batch_cells = []
 
     print(f"\nScanning {len(all_rows) - 1} signal rows for missing outcomes...\n")
 
@@ -492,289 +447,84 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
         print(f"           Exit={spx_exit_price:.2f} ({exit_source}) | Move={overnight_move_pct:+.4f}% | {outcome}")
 
         if not dry_run:
-            # Update cells: columns are 1-indexed in gspread
-            # COL_SPX_NEXT_OPEN stores exit price (10 AM when available, else daily open)
-            try:
-                ws.update_cell(row_idx + 1, COL_SPX_NEXT_OPEN + 1, spx_exit_price)
-                ws.update_cell(row_idx + 1, COL_SPX_NEXT_CLOSE + 1, spx_next_close)
-                ws.update_cell(row_idx + 1, COL_OVERNIGHT_MOVE + 1, f"{overnight_move_pct:+.4f}%")
-                ws.update_cell(row_idx + 1, COL_OUTCOME_CORRECT + 1, outcome)
-                updates_made += 1
-            except Exception as e:
-                print(f"           ERROR updating row: {e}")
+            # Collect batch updates (written after the loop)
+            r = row_idx + 1  # 1-indexed row
+            batch_cells.append(gspread.Cell(r, COL_SPX_NEXT_OPEN + 1, str(spx_exit_price)))
+            batch_cells.append(gspread.Cell(r, COL_SPX_NEXT_CLOSE + 1, str(spx_next_close)))
+            batch_cells.append(gspread.Cell(r, COL_OVERNIGHT_MOVE + 1, str(round(overnight_move_pct, 4))))
+            batch_cells.append(gspread.Cell(r, COL_OUTCOME_CORRECT + 1, outcome))
+            updates_made += 1
+
+    # Batch write all updates at once (avoids per-cell rate limits)
+    if not dry_run and batch_cells:
+        try:
+            ws.update_cells(batch_cells, value_input_option='RAW')
+            print(f"\nBatch-wrote {len(batch_cells)} cells ({updates_made} rows)")
+        except Exception as e:
+            print(f"\nERROR batch-writing cells: {e}")
 
     print(f"\n{'DRY RUN — ' if dry_run else ''}Processed {len(results)} rows, updated {updates_made}")
     return results
 
 
-def _print_poke_stability(all_rows: List[List[str]]) -> None:
-    """Print poke stability analysis comparing later signals to the decision signal.
+def print_backfill_summary() -> Optional[str]:
+    """Print a short backfill summary and point to analyze_signals.py.
 
-    Decision signal: the first signal logged in the trading window (by timestamp).
-    Validation signals: any subsequent signals on the same date.
-
-    Uses timestamp ordering (not poke_number) so local runs where
-    poke_number resets to 1 are handled correctly.
-
-    This section answers: "If we had waited, would we have made a better decision?"
+    Returns the summary text (for HTML saving), or None if no data.
     """
-    date_groups = _group_rows_by_date(all_rows)
-
-    # Only analyze dates with multiple signals AND outcome data
-    multi_signal_dates = {}
-    for date_key, signals in date_groups.items():
-        if len(signals) < 2:
-            continue
-        # Need outcome data (overnight move) from the decision signal
-        if signals[0].get('overnight_move') is None:
-            continue
-        multi_signal_dates[date_key] = signals
-
-    if not multi_signal_dates:
-        print(f"\n  {'─' * 50}")
-        print(f"  POKE STABILITY ANALYSIS")
-        print(f"  {'─' * 50}")
-        print(f"    No multi-signal dates with outcome data yet.")
-        print(f"    (Need decision signal + at least one later signal with backfilled outcomes)")
-        return
-
-    # Metrics
-    total_dates = len(multi_signal_dates)
-    all_agree = 0          # all signals produced the same tier
-    first_better = 0       # first signal made the better call
-    later_better = 0       # a later signal would have been better
-    same_outcome = 0       # both would have been equally correct/wrong
-    signal_changes = []    # track what changed and when
-
-    for date_key in sorted(multi_signal_dates):
-        signals = multi_signal_dates[date_key]
-        decision = signals[0]   # first by timestamp = the actual trade
-        overnight = decision['overnight_move']
-
-        # Get all signal tiers for this date
-        all_tiers = [s['signal'] for s in signals]
-        unique_tiers = set(all_tiers)
-
-        if len(unique_tiers) == 1:
-            all_agree += 1
-            same_outcome += 1
-            continue
-
-        # Signals disagree — evaluate which was better
-        decision_result = _hypothetical_outcome(decision['signal'], overnight)
-
-        # Compare against the latest validation signal
-        latest = signals[-1]
-        latest_result = _hypothetical_outcome(latest['signal'], overnight)
-
-        if decision_result == latest_result:
-            same_outcome += 1
-        elif decision_result == 'CORRECT':
-            first_better += 1
-        else:
-            later_better += 1
-
-        # Track the change for detailed output
-        article_change = ""
-        if decision.get('sent_to_gpt') is not None and latest.get('sent_to_gpt') is not None:
-            diff = latest['sent_to_gpt'] - decision['sent_to_gpt']
-            if diff != 0:
-                article_change = f" (articles: {decision['sent_to_gpt']}→{latest['sent_to_gpt']})"
-
-        signal_changes.append({
-            'date': date_key,
-            'first_signal': decision['signal'],
-            'later_signal': latest['signal'],
-            'overnight': overnight,
-            'first_result': decision_result,
-            'later_result': latest_result,
-            'article_change': article_change,
-        })
-
-    # Print section
-    print(f"\n  {'─' * 50}")
-    print(f"  POKE STABILITY ANALYSIS ({total_dates} nights with 2+ signals)")
-    print(f"  {'─' * 50}")
-
-    stability_pct = all_agree / total_dates * 100 if total_dates else 0
-    print(f"  Signal stability: {all_agree}/{total_dates} nights all signals agree ({stability_pct:.0f}%)")
-
-    disagreements = total_dates - all_agree
-    if disagreements > 0:
-        print(f"  Disagreements: {disagreements} nights")
-        print(f"    First signal was better:  {first_better} ({first_better/disagreements*100:.0f}%)")
-        print(f"    Later signal was better:  {later_better} ({later_better/disagreements*100:.0f}%)")
-        print(f"    Same outcome either way: {same_outcome - all_agree} ({(same_outcome - all_agree)/disagreements*100:.0f}%)")
-
-        if later_better > first_better:
-            print(f"\n    ** Later signals are consistently better — consider delaying the decision **")
-        elif first_better > later_better:
-            print(f"\n    ** First signal timing is good — later news doesn't improve decisions **")
-
-    # Show individual disagreements
-    changes_only = [c for c in signal_changes if c['first_signal'] != c['later_signal']]
-    if changes_only:
-        print(f"\n    Signal changes:")
-        for c in changes_only:
-            arrow = "→"
-            verdict = ""
-            if c['first_result'] != c['later_result']:
-                winner = "1st signal" if c['first_result'] == 'CORRECT' else "Later signal"
-                verdict = f" [{winner} was right]"
-            else:
-                verdict = f" [same outcome]"
-            move_str = f"{c['overnight']:.4f}"
-            print(f"      {c['date']}: {c['first_signal']} {arrow} {c['later_signal']}"
-                  f" (move={move_str}%){c['article_change']}{verdict}")
-
-
-def print_accuracy_report(results: Optional[List[Dict]] = None):
-    """Print a signal accuracy report from Sheet data."""
     ws = _connect_sheet()
     if ws is None:
-        return
+        return None
 
     all_rows = ws.get_all_values()
     if len(all_rows) < 2:
         print("No data rows found")
-        return
+        return None
 
-    # Collect outcomes
-    all_outcomes = []
+    total_rows = len(all_rows) - 1
+    with_outcomes = 0
+    awaiting = 0
+    traded = 0
+    not_traded = 0
 
     for row in all_rows[1:]:
         while len(row) <= COL_OUTCOME_CORRECT:
             row.append("")
 
         signal = row[COL_SIGNAL]
-        outcome = row[COL_OUTCOME_CORRECT]
-        overnight_str = row[COL_OVERNIGHT_MOVE]
-        trade_executed_raw = row[COL_TRADE_EXECUTED]
-
-        if not outcome or not signal:
+        if not signal:
             continue
 
-        try:
-            overnight = float(overnight_str.replace('%', '').replace('+', ''))
-        except (ValueError, TypeError):
-            overnight = None
+        trade_executed = row[COL_TRADE_EXECUTED]
+        outcome = row[COL_OUTCOME_CORRECT]
 
-        trade_executed = _infer_trade_executed(signal, trade_executed_raw)
+        if outcome:
+            with_outcomes += 1
+            if trade_executed == 'YES':
+                traded += 1
+            elif trade_executed and trade_executed != 'NO_DUPLICATE':
+                not_traded += 1
+        elif signal and row[COL_SPX_CURRENT]:
+            awaiting += 1
 
-        entry = {
-            'signal': signal,
-            'outcome': outcome,
-            'overnight_move': overnight,
-            'trade_executed': trade_executed,
-        }
-        all_outcomes.append(entry)
+    lines = []
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append("  BACKFILL SUMMARY")
+    lines.append("=" * 50)
+    lines.append(f"  Total rows:           {total_rows}")
+    lines.append(f"  With outcomes:        {with_outcomes}")
+    lines.append(f"    Traded (YES):       {traded}")
+    lines.append(f"    Not traded:         {not_traded}")
+    lines.append(f"  Awaiting backfill:    {awaiting}")
+    lines.append("")
+    lines.append("  For detailed analysis, run:")
+    lines.append("    python analyze_signals.py")
+    lines.append("=" * 50)
 
-    if not all_outcomes:
-        print("No outcome data available yet. Run: python validate_outcomes.py")
-        return
-
-    # Split into actually traded vs not traded
-    traded = [o for o in all_outcomes if o['trade_executed'] == 'YES']
-    not_traded = [o for o in all_outcomes if o['trade_executed'] != 'YES']
-
-    total = len(all_outcomes)
-    total_correct = sum(1 for o in all_outcomes if 'CORRECT' in o['outcome'])
-
-    print("\n" + "=" * 70)
-    print("  SIGNAL ACCURACY REPORT")
-    print("=" * 70)
-
-    print(f"\n  Total signals: {total} | Traded: {len(traded)} | Not traded: {len(not_traded)}")
-    print(f"  Overall Accuracy: {total_correct}/{total} ({total_correct/total*100:.1f}%)")
-
-    # ── Section 1: Actually Traded ──
-    if traded:
-        traded_correct = sum(1 for o in traded if 'CORRECT' in o['outcome'])
-        print(f"\n  {'─' * 50}")
-        print(f"  ACTUALLY TRADED ({len(traded)} days)")
-        print(f"  {'─' * 50}")
-        print(f"  Trade Survival Rate: {traded_correct}/{len(traded)} ({traded_correct/len(traded)*100:.1f}%)")
-
-        # By signal tier
-        for tier in ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE']:
-            entries = [o for o in traded if o['signal'] == tier]
-            if not entries:
-                continue
-            correct = sum(1 for e in entries if 'CORRECT' in e['outcome'])
-            n = len(entries)
-            moves = [e['overnight_move'] for e in entries if e['overnight_move'] is not None]
-            print(f"\n    {tier}: {correct}/{n} correct ({correct/n*100:.1f}%)")
-            print(f"      Threshold: {MOVE_THRESHOLDS[tier]:.2f}%")
-            if moves:
-                print(f"      Avg overnight move: {sum(moves)/len(moves):.4f}%")
-                print(f"      Max overnight move: {max(moves):.4f}%")
-
-        blown = [o for o in traded if 'WRONG' in o['outcome']]
-        if blown:
-            print(f"\n    Blown trades: {len(blown)}")
-            for b in blown:
-                print(f"      {b['signal']} | move={b['overnight_move']:.4f}%")
-
-    # ── Section 2: Not Traded ──
-    if not_traded:
-        nt_correct = sum(1 for o in not_traded if 'CORRECT' in o['outcome'])
-        print(f"\n  {'─' * 50}")
-        print(f"  NOT TRADED ({len(not_traded)} days)")
-        print(f"  {'─' * 50}")
-        print(f"  Correct to skip: {nt_correct}/{len(not_traded)} ({nt_correct/len(not_traded)*100:.1f}%)")
-
-        # Group by skip reason
-        skip_reasons = {}
-        for o in not_traded:
-            te = o['trade_executed']
-            # Normalize entries with details in parentheses
-            if te.startswith('NO_VIX_GATE'):
-                reason = 'NO_VIX_GATE'
-            elif te.startswith('NO_OA_EVENT'):
-                reason = 'NO_OA_EVENT'
-            else:
-                reason = te
-            if reason not in skip_reasons:
-                skip_reasons[reason] = []
-            skip_reasons[reason].append(o)
-
-        for reason in ['NO_SKIP', 'NO_FRIDAY', 'NO_VIX_GATE', 'NO_OA_EVENT', 'NO_DUPLICATE']:
-            entries = skip_reasons.get(reason, [])
-            if not entries:
-                continue
-            correct = sum(1 for e in entries if 'CORRECT' in e['outcome'])
-            n = len(entries)
-            moves = [e['overnight_move'] for e in entries if e['overnight_move'] is not None]
-
-            label = {
-                'NO_SKIP': 'Signal SKIP',
-                'NO_FRIDAY': 'Friday (no trade)',
-                'NO_VIX_GATE': 'OA VIX gate (>=25)',
-                'NO_OA_EVENT': 'OA event gate (FOMC/CPI/early close)',
-                'NO_DUPLICATE': 'Duplicate webhook',
-            }.get(reason, reason)
-
-            print(f"\n    {label}: {correct}/{n} correct ({correct/n*100:.1f}%)")
-            if moves:
-                print(f"      Avg overnight move: {sum(moves)/len(moves):.4f}%")
-            # Show missed opportunities
-            missed = [e for e in entries if 'WRONG' in e['outcome']]
-            if missed:
-                print(f"      Missed opportunities: {len(missed)} (move was < 0.80%)")
-
-    # ── Signal distribution ──
-    print(f"\n  {'─' * 50}")
-    print(f"  SIGNAL DISTRIBUTION")
-    print(f"  {'─' * 50}")
-    for tier in ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP']:
-        n = sum(1 for o in all_outcomes if o['signal'] == tier)
-        pct = n / total * 100 if total else 0
-        print(f"    {tier}: {n} ({pct:.0f}%)")
-
-    # ── Poke stability analysis ──
-    _print_poke_stability(all_rows)
-
-    print("\n" + "=" * 70)
+    summary = '\n'.join(lines)
+    print(summary)
+    return summary
 
 
 if __name__ == '__main__':
@@ -783,11 +533,16 @@ if __name__ == '__main__':
     report_only = '--report' in args
 
     if report_only:
-        print_accuracy_report()
+        summary = print_backfill_summary()
     else:
         results = backfill_outcomes(dry_run=dry_run)
-        if results:
-            print_accuracy_report()
-        elif not dry_run:
-            # Try report anyway if outcomes already exist
-            print_accuracy_report()
+        summary = print_backfill_summary()
+
+    # Auto-save as HTML
+    if summary:
+        try:
+            from report_writer import save_html_report
+            path = save_html_report(summary, prefix='validate')
+            print(f"\n  Report saved: {path}")
+        except Exception as e:
+            print(f"\n  (Could not save HTML report: {e})")

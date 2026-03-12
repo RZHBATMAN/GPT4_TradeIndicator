@@ -49,6 +49,25 @@ SHEET_HEADERS = [
     "SPX_Next_Close",
     "Overnight_Move_Pct",
     "Outcome_Correct",
+    # ── Enriched logging columns (appended at END to avoid shifting existing data) ──
+    "Day_Of_Week",
+    "IV_RV_Base_Score",
+    "RV_Modifier",
+    "Term_Modifier",
+    "Term_Structure_Ratio",
+    "Trend_Base_Score",
+    "Intraday_Modifier",
+    "Intraday_Range_Pct",
+    "GPT_Raw_Score",
+    "GPT_Direction_Risk",
+    "Earnings_Modifier",
+    "Earnings_Tickers",
+    "GPT_Pre_Earnings_Score",
+    "Pass1_Composite",
+    "Pass1_Signal",
+    "Pass2_Composite",
+    "Pass2_Signal",
+    "Passes_Agreed",
 ]
 
 
@@ -122,6 +141,29 @@ def _ensure_header(ws) -> None:
         logger.warning("Could not ensure header row: %s", e)
 
 
+def _ts_day_of_week(timestamp: str) -> str:
+    """Extract day of week from timestamp string (e.g. 'Monday')."""
+    try:
+        from datetime import datetime as _dt
+        import pytz as _pytz
+        for fmt in ["%Y-%m-%d %I:%M:%S %p %Z", "%Y-%m-%d %I:%M:%S %p EST",
+                     "%Y-%m-%d %I:%M:%S %p EDT", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+            try:
+                dt = _dt.strptime(timestamp.strip(), fmt)
+                return dt.strftime('%A')
+            except ValueError:
+                continue
+        return ""
+    except Exception:
+        return ""
+
+
+def _format_earnings_tickers(earnings: Dict[str, Any]) -> str:
+    """Format earnings tickers for Sheets column."""
+    tickers = earnings.get('reporting_today', []) + earnings.get('reporting_tomorrow', [])
+    return ', '.join(tickers) if tickers else 'None'
+
+
 def log_signal(
     *,
     timestamp: str,
@@ -138,6 +180,9 @@ def log_signal(
     vix_current: Optional[float] = None,
     trade_executed: str = "",
     poke_number: int = 1,
+    # Enriched logging (all optional with defaults for backward compatibility)
+    earnings: Optional[Dict[str, Any]] = None,
+    confirmation_pass: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
     print("[Sheets] log_signal called")
@@ -197,6 +242,25 @@ def log_signal(
             "",  # SPX_Next_Close
             "",  # Overnight_Move_Pct
             "",  # Outcome_Correct
+            # ── Enriched logging columns ──
+            _ts_day_of_week(timestamp),                                             # Day_Of_Week
+            iv_rv.get("base_score", ""),                                            # IV_RV_Base_Score
+            iv_rv.get("rv_modifier", ""),                                           # RV_Modifier
+            iv_rv.get("term_modifier", ""),                                         # Term_Modifier
+            iv_rv.get("term_structure_ratio", ""),                                  # Term_Structure_Ratio
+            trend.get("base_score", ""),                                            # Trend_Base_Score
+            trend.get("intraday_modifier", ""),                                     # Intraday_Modifier
+            f"{(trend.get('intraday_range') or 0) * 100:.2f}%" if trend.get("intraday_range") is not None else "",  # Intraday_Range_Pct
+            gpt.get("raw_score", ""),                                              # GPT_Raw_Score
+            gpt.get("direction_risk", ""),                                          # GPT_Direction_Risk
+            earnings.get("risk_modifier", "") if earnings else "",                  # Earnings_Modifier
+            _format_earnings_tickers(earnings) if earnings else "",                 # Earnings_Tickers
+            gpt.get("pre_earnings_score", ""),                                     # GPT_Pre_Earnings_Score
+            confirmation_pass.get("pass1_composite", "") if confirmation_pass else "",  # Pass1_Composite
+            confirmation_pass.get("pass1_signal", "") if confirmation_pass else "",     # Pass1_Signal
+            confirmation_pass.get("pass2_composite", "") if confirmation_pass else "",  # Pass2_Composite
+            confirmation_pass.get("pass2_signal", "") if confirmation_pass else "",     # Pass2_Signal
+            confirmation_pass.get("passes_agreed", "") if confirmation_pass else "",    # Passes_Agreed
         ]
 
         ws.append_row(row, value_input_option="USER_ENTERED")

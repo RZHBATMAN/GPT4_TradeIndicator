@@ -13,3 +13,7 @@ env/
 # Env files if you ever add them
 .env
 .env.local
+
+# Generated reports (local only, not for git)
+reports/*.html
+reports/*.txt

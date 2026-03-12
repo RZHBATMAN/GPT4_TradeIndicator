@@ -38,6 +38,8 @@ def analyze_market_trend(spx_data):
     
     return {
         'score': final_score,
+        'base_score': base_score,
+        'intraday_modifier': modifier,
         'change_5d': change_5d,
         'intraday_range': intraday_range
     }

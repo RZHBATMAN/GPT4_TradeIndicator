@@ -478,6 +478,15 @@ def option_alpha_trigger():
         idx_1 = tier_order.index(signal['signal']) if signal['signal'] in tier_order else 3
         idx_2 = tier_order.index(signal_2['signal']) if signal_2['signal'] in tier_order else 3
 
+        # Capture confirmation pass data BEFORE signal/composite get overwritten
+        confirmation_pass_data = {
+            'pass1_composite': composite['score'],
+            'pass1_signal': signal['signal'],
+            'pass2_composite': composite_2['score'],
+            'pass2_signal': signal_2['signal'],
+            'passes_agreed': 'YES' if idx_1 == idx_2 else 'NO',
+        }
+
         if idx_2 > idx_1:
             # Second pass is more conservative — use it
             print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
@@ -604,6 +613,8 @@ def option_alpha_trigger():
             vix_current=vix_current,
             trade_executed=trade_executed,
             poke_number=poke_number,
+            earnings=analysis_result.get('earnings'),
+            confirmation_pass=confirmation_pass_data,
         )
 
         # Record successful signal for alerting

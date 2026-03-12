@@ -145,10 +145,13 @@ def run_signal_analysis(spx_data, vix1d_data, news_data, vix_data=None, gpt_temp
 
     indicators = {'iv_rv': iv_rv, 'trend': trend, 'gpt': gpt}
 
+    # Store pre-earnings score for enriched logging
+    gpt['pre_earnings_score'] = gpt['score']
+
     # Check Mag 7 earnings calendar — acts as a safety net for GPT
     earnings = check_mag7_earnings()
     if earnings['risk_modifier'] > 0:
-        gpt_original = gpt['score']
+        gpt_original = gpt['pre_earnings_score']
         gpt['score'] = min(10, gpt['score'] + earnings['risk_modifier'])
         print(f"\n  [EARNINGS CALENDAR] {earnings['message']}")
         print(f"    GPT score adjusted: {gpt_original} → {gpt['score']} (+{earnings['risk_modifier']})")

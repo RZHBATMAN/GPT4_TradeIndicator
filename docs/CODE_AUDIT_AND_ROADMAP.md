@@ -121,17 +121,61 @@ Polygon Massive Indices Starter provides 15-min delayed SPX/VIX1D/VIX. During vo
 
 ---
 
+## Enriched Logging (Added 2026-03-08)
+
+### Bug Fix — Missing helper functions in validate_outcomes.py
+**File:** `validate_outcomes.py`
+**Severity:** HIGH — script would crash on any operation
+
+`_parse_signal_date()` and `_next_weekday()` were called but never defined. Added both functions to parse Sheets timestamps and skip weekends.
+
+### 18 New Logging Columns
+**Files:** `signals/iv_rv_ratio.py`, `signals/market_trend.py`, `signal_engine.py`, `sheets_logger.py`, `app.py`
+
+Added 18 new columns **at the END** of SHEET_HEADERS (indices 32-49) to capture intermediate values that were previously computed but discarded:
+
+- **Factor sub-scores:** IV_RV_Base_Score, RV_Modifier, Term_Modifier, Term_Structure_Ratio, Trend_Base_Score, Intraday_Modifier, Intraday_Range_Pct
+- **GPT details:** GPT_Raw_Score (before calibration), GPT_Direction_Risk, GPT_Pre_Earnings_Score (before +1/+2)
+- **Earnings:** Earnings_Modifier, Earnings_Tickers
+- **Confirmation pass:** Pass1_Composite, Pass1_Signal, Pass2_Composite, Pass2_Signal, Passes_Agreed
+- **Meta:** Day_Of_Week
+
+These enable the analysis script to do factor attribution, parameter sensitivity, and confirmation pass effectiveness analysis.
+
+### Comprehensive Analysis Script
+**File:** `analyze_signals.py` (NEW)
+
+Read-only analytics engine with 11 sections:
+1. Executive Summary — win rate, P&L proxy, streaks
+2. Factor Attribution — correlation, sub-score impact
+3. Parameter Sensitivity — sweep tier boundaries and factor weights
+4. GPT Calibration — raw vs calibrated, score distribution
+5. Confirmation Pass — agreement rate, value assessment
+6. Day-of-Week — per-day win rates
+7. VIX Regime — low/normal/elevated/high performance
+8. Earnings Modifier — accuracy on earnings vs non-earnings days
+9. Contradiction Detection — override/adjustment effectiveness
+10. Score Distribution — composite histogram, optimal boundaries
+11. Actionable Recommendations — auto-generated tuning suggestions
+
+Usage: `python analyze_signals.py` (full report) or `python analyze_signals.py --section factor` (single section)
+
+---
+
 ## Files Modified in This Audit
 
 | File | Changes |
 |------|---------|
 | `signals/gpt_news.py` | Fixed entry/exit times in prompt; added `temperature` parameter |
-| `signal_engine.py` | Added `gpt_temperature` kwarg passthrough |
+| `signal_engine.py` | Added `gpt_temperature` kwarg passthrough; store `pre_earnings_score` |
 | `webhooks.py` | Full rewrite: retry with backoff, proper exception handling |
-| `app.py` | Webhook success gating, Slack alert on failure, confirmation pass temp=0.4 |
-| `sheets_logger.py` | Added `GPT_Tokens` + `GPT_Cost` columns |
-| `validate_outcomes.py` | Shifted column indices +2 for new Sheets columns |
+| `app.py` | Webhook success gating, Slack alert on failure, confirmation pass temp=0.4, enriched logging passthrough |
+| `sheets_logger.py` | Added `GPT_Tokens` + `GPT_Cost` columns; added 18 enriched logging columns at END |
+| `validate_outcomes.py` | Shifted column indices +2 for GPT cost columns; added missing `_parse_signal_date` + `_next_weekday` |
 | `data/oa_event_calendar.py` | Added `NFP_DATES` + `NFP_NEXT_DAY` gate |
+| `signals/iv_rv_ratio.py` | Added `base_score` + `rv_modifier` to return dict |
+| `signals/market_trend.py` | Added `base_score` + `intraday_modifier` to return dict |
+| `analyze_signals.py` | **NEW** — comprehensive 11-section analysis script |
 
 ---
 
@@ -143,8 +187,9 @@ Polygon Massive Indices Starter provides 15-min delayed SPX/VIX1D/VIX. During vo
    - Webhook should show retry attempts if it fails
 
 2. Check Google Sheets:
-   - Header row should auto-update with `GPT_Tokens` and `GPT_Cost` columns
-   - New rows should have token counts and cost values populated
+   - Header row should auto-update with all 50 columns (32 original + 18 enriched)
+   - New rows should have enriched columns populated (base scores, modifiers, pass data)
+   - Existing rows' first 32 columns should be untouched
 
 3. On a Thursday before NFP Friday:
    - `Trade_Executed` should show `NO_OA_EVENT (NFP release tomorrow)`
@@ -154,3 +199,10 @@ Polygon Massive Indices Starter provides 15-min delayed SPX/VIX1D/VIX. During vo
    - Trigger signal — should see 3 retry attempts in logs
    - Should receive Slack alert
    - Next poke should retry (since `webhook_sent` stays `False`)
+
+5. Run analysis script:
+   - `python analyze_signals.py` — should show graceful "insufficient data" messages
+   - After collecting 10+ signals: `python analyze_signals.py` — should show full report
+
+6. Run validate_outcomes.py:
+   - `python validate_outcomes.py --report` — should no longer crash (missing functions fixed)

@@ -90,6 +90,8 @@ def analyze_iv_rv_ratio(spx_data, vix1d_data, vix_data=None):
 
     result = {
         'score': final_score,
+        'base_score': base_score,
+        'rv_modifier': modifier,
         'realized_vol': round(realized_vol, 2),
         'implied_vol': round(implied_vol, 2),
         'iv_rv_ratio': round(iv_rv_ratio, 3),

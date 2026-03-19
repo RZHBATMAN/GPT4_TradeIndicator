@@ -28,10 +28,10 @@ from typing import Dict, List, Optional, Tuple
 import requests
 import pytz
 
-from config.loader import get_config
-from signals.iv_rv_ratio import analyze_iv_rv_ratio
-from signals.market_trend import analyze_market_trend
-from signal_engine import calculate_composite_score, generate_signal, detect_contradictions
+from core.config import get_config
+from desks.overnight_condors.signals.iv_rv_ratio import analyze_iv_rv_ratio
+from desks.overnight_condors.signals.market_trend import analyze_market_trend
+from desks.overnight_condors.signal_engine import calculate_composite_score, generate_signal, detect_contradictions
 
 ET_TZ = pytz.timezone('US/Eastern')
 

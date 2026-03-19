@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
 
-from config.loader import get_config
+from core.config import get_config
 from sheets_logger import SHEET_HEADERS
 
 logger = logging.getLogger(__name__)
@@ -1956,7 +1956,7 @@ if __name__ == '__main__':
 
     # Auto-save as styled HTML report
     try:
-        from report_writer import save_html_report
+        from core.report_writer import save_html_report
         path = save_html_report(sections, prefix='analysis')
         print(f"\n  Report saved: {path}")
         print(f"  View in browser: open {path}")

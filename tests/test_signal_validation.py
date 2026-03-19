@@ -7,14 +7,14 @@ Run: python -m pytest tests/test_signal_validation.py -v
 """
 import math
 import pytest
-from signal_engine import (
+from desks.overnight_condors.signal_engine import (
     calculate_composite_score,
     generate_signal,
     detect_contradictions,
 )
-from signals.iv_rv_ratio import analyze_iv_rv_ratio
-from signals.market_trend import analyze_market_trend
-from alerting import (
+from desks.overnight_condors.signals.iv_rv_ratio import analyze_iv_rv_ratio
+from desks.overnight_condors.signals.market_trend import analyze_market_trend
+from core.alerting import (
     record_signal_success,
     record_api_failure,
     record_poke,
@@ -558,7 +558,7 @@ class TestOutcomeEvaluation:
 
     def test_correct_trade_within_threshold(self):
         """Overnight move within breakeven → CORRECT_TRADE."""
-        from validate_outcomes import _evaluate_outcome
+        from desks.overnight_condors.validate_outcomes import _evaluate_outcome
         # SPX entry 5800, exit 5830 → 0.517% move (< 1.00% aggressive threshold)
         move, outcome = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, 5830, 5840)
         assert outcome == 'CORRECT_TRADE'
@@ -566,7 +566,7 @@ class TestOutcomeEvaluation:
 
     def test_wrong_trade_beyond_threshold(self):
         """Overnight move beyond breakeven → WRONG_TRADE."""
-        from validate_outcomes import _evaluate_outcome
+        from desks.overnight_condors.validate_outcomes import _evaluate_outcome
         # SPX entry 5800, exit 5860 → 1.034% move (> 1.00% aggressive threshold)
         move, outcome = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, 5860, 5870)
         assert outcome == 'WRONG_TRADE'
@@ -574,7 +574,7 @@ class TestOutcomeEvaluation:
 
     def test_conservative_wider_threshold(self):
         """Conservative uses 0.80% threshold, narrower than aggressive."""
-        from validate_outcomes import _evaluate_outcome
+        from desks.overnight_condors.validate_outcomes import _evaluate_outcome
         # 0.85% move: within aggressive threshold but beyond conservative
         exit_price = 5800 * (1 + 0.0085)
         move, outcome = _evaluate_outcome('TRADE_CONSERVATIVE', 'YES', 5800, exit_price, exit_price + 10)
@@ -585,20 +585,20 @@ class TestOutcomeEvaluation:
 
     def test_skip_correct_when_big_move(self):
         """SKIP is correct when overnight move >= 0.80%."""
-        from validate_outcomes import _evaluate_outcome
+        from desks.overnight_condors.validate_outcomes import _evaluate_outcome
         exit_price = 5800 * (1 + 0.009)  # 0.9% move
         move, outcome = _evaluate_outcome('SKIP', 'NO_SKIP', 5800, exit_price, exit_price + 5)
         assert outcome == 'CORRECT_SKIP'
 
     def test_skip_wrong_when_small_move(self):
         """SKIP is wrong when overnight move < 0.80% (missed opportunity)."""
-        from validate_outcomes import _evaluate_outcome
+        from desks.overnight_condors.validate_outcomes import _evaluate_outcome
         move, outcome = _evaluate_outcome('SKIP', 'NO_SKIP', 5800, 5810, 5815)
         assert outcome == 'WRONG_SKIP'
 
     def test_exit_price_used_not_close(self):
         """The exit price (param 4) drives the outcome, not the close (param 5)."""
-        from validate_outcomes import _evaluate_outcome
+        from desks.overnight_condors.validate_outcomes import _evaluate_outcome
         # Exit at 5805 (tiny move), close at 5900 (huge move)
         move, outcome = _evaluate_outcome('TRADE_AGGRESSIVE', 'YES', 5800, 5805, 5900)
         assert outcome == 'CORRECT_TRADE'
@@ -606,7 +606,7 @@ class TestOutcomeEvaluation:
 
     def test_oa_exit_params_documented(self):
         """OA exit parameters are documented as constants."""
-        from validate_outcomes import OA_EXIT_PARAMS, OA_TIME_EXIT
+        from desks.overnight_condors.validate_outcomes import OA_EXIT_PARAMS, OA_TIME_EXIT
         assert OA_EXIT_PARAMS['TRADE_AGGRESSIVE']['profit_pct'] == 15
         assert OA_EXIT_PARAMS['TRADE_NORMAL']['stop_pct'] == 100
         assert OA_EXIT_PARAMS['TRADE_CONSERVATIVE']['profit_pct'] == 40

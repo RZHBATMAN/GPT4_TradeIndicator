@@ -1,0 +1,126 @@
+"""Configuration loader for the SPX Vol Signal system.
+
+Load order: local .config file first (project root), then fall back to
+environment variables (e.g. Railway). Use .config for local dev and
+env vars for deployed environments.
+
+Desk-aware: reads ALL keys from .config sections dynamically.
+Desk 2+ keys use a prefix (e.g. DESK2_TRADE_AGGRESSIVE_URL).
+"""
+import logging
+import os
+from configparser import ConfigParser
+from pathlib import Path
+from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+# Keys required for the app (same names as env vars)
+REQUIRED_KEYS = [
+    "OPENAI_API_KEY",
+    "POLYGON_API_KEY",
+    "TRADE_AGGRESSIVE_URL",
+    "TRADE_NORMAL_URL",
+    "TRADE_CONSERVATIVE_URL",
+    "NO_TRADE_URL",
+]
+
+# Optional
+OPTIONAL_KEYS = [
+    "OPENAI_MODEL",  # e.g. gpt-4o-mini, gpt-4o, gpt-4.1-mini; default gpt-4o-mini
+    "GOOGLE_SHEET_ID",
+    "GOOGLE_CREDENTIALS_JSON",
+    "ALERT_WEBHOOK_URL",  # Slack incoming webhook URL for system failure alerts
+]
+
+
+def _project_root() -> Path:
+    """Project root: parent of the core package directory."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _load_from_file(config_path: Path) -> Optional[Dict[str, str]]:
+    """Load config from INI-style .config file. Returns None if file missing or unreadable.
+
+    Reads ALL keys from all sections dynamically (not hardcoded list).
+    """
+    if not config_path.is_file():
+        return None
+    try:
+        # interpolation=None so values can contain % (e.g. %40 in JSON emails) without being interpreted
+        parser = ConfigParser(interpolation=None)
+        parser.read(config_path, encoding="utf-8")
+        out: Dict[str, str] = {}
+        for section in parser.sections():
+            for key, value in parser.items(section):
+                # Store with uppercase key name (config keys are case-insensitive in INI)
+                out[key.upper()] = (value or "").strip() or None
+        return out
+    except Exception as e:
+        logger.warning("Could not load .config file %s: %s", config_path, e)
+        return None
+
+
+def load_config() -> Dict[str, str]:
+    """Load config: .config in project root first, then environment variables.
+
+    - Local: place .config in project root (see .config.example for format).
+    - Railway/deployed: set env vars; .config is absent so only env is used.
+    """
+    config_path = _project_root() / ".config"
+    result: Dict[str, str] = {}
+
+    # 1) Try local .config first
+    file_config = _load_from_file(config_path)
+    if file_config:
+        # Load all keys from file, with env fallback
+        for k, v in file_config.items():
+            result[k] = v or os.environ.get(k) or ""
+
+        # Also load required/optional keys that might only be in env
+        for k in REQUIRED_KEYS + OPTIONAL_KEYS:
+            if k not in result:
+                result[k] = os.environ.get(k) or ""
+
+        result["_FROM_FILE"] = "1"  # Truthy: app can treat as "local" (e.g. 24hr trading window)
+        logger.info("Config loaded from .config with env fallback: %s", config_path)
+    else:
+        # 2) No .config or failed: use environment only (e.g. Railway)
+        for k in REQUIRED_KEYS:
+            result[k] = os.environ.get(k) or ""
+        for k in OPTIONAL_KEYS:
+            result[k] = os.environ.get(k) or ""
+        # Also load any DESK2_* env vars
+        for k, v in os.environ.items():
+            if k.startswith("DESK") and k not in result:
+                result[k] = v
+        result["_FROM_FILE"] = ""  # Falsy: production/deployed
+        logger.info("Config loaded from environment variables (no .config)")
+
+    missing = [k for k in REQUIRED_KEYS if not (result.get(k) or "").strip()]
+    if missing:
+        raise ValueError(f"Missing configuration: {', '.join(missing)}. Set in .config or environment.")
+
+    return result
+
+
+# Global config instance (loaded once at import)
+_CONFIG: Optional[Dict[str, str]] = None
+
+
+def get_config() -> Dict[str, str]:
+    """Return the global config (lazy-loaded)."""
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = load_config()
+    return _CONFIG
+
+
+def get_desk_config(config: Dict[str, str], prefix: str, key: str, default: str = "") -> str:
+    """Get a desk-specific config value.
+
+    For desk 1 (prefix=""), reads e.g. TRADE_AGGRESSIVE_URL.
+    For desk 2 (prefix="DESK2_"), reads e.g. DESK2_TRADE_AGGRESSIVE_URL.
+    """
+    full_key = f"{prefix}{key}" if prefix else key
+    return (config.get(full_key) or "").strip() or default

@@ -1,103 +1,97 @@
 #!/usr/bin/env python3
 """
-SPX Overnight Vol Premium Bot - Railway Production
-Uses Polygon/Massive Indices Starter ($49/mo) - 15-min delayed data
-Real SPX + VIX1D data (no more proxies!)
+Ren's Trading Firm — Multi-Desk Signal System
 
-Triple-Layer Filtering: Algo Dedup → Keyword Filter → GPT Analysis
+Slim app.py: Flask app, desk registry, unified tabbed dashboard.
+Each desk registers its own routes via desk.register_routes(app).
 """
 
 from flask import Flask, jsonify
-from datetime import datetime, time as dt_time
+from datetime import datetime
 import pytz
 import os
-import threading
-import time as time_module
-import random
-import requests
 
-# Import modular components
-from config.loader import get_config
-from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_vix_with_retry, get_vvix_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_vix_snapshot, get_vvix_snapshot, get_spx_aggregates
-from data.news_fetcher import fetch_news_raw
-from processing.pipeline import process_news_pipeline
-from signal_engine import run_signal_analysis
-from webhooks import send_webhook
-from sheets_logger import log_signal as log_signal_to_sheets
-from alerting import record_signal_success, record_api_failure, record_poke, check_end_of_window, reset_daily, get_alert_status
-from data.oa_event_calendar import check_oa_event_gates, format_gate_reasons
+from core.config import get_config
+from core.alerting import get_alert_status
+from core.scheduler import start_scheduler
+from core.data.market_data import get_spx_snapshot, get_vix1d_snapshot, get_vix_snapshot, get_spx_aggregates
+from desks import ACTIVE_DESKS
 
 app = Flask(__name__)
 
 # Configuration
 ET_TZ = pytz.timezone('US/Eastern')
-
-# Trading windows - PRODUCTION: Mon-Fri, 1:30-2:30 PM ET
-TRADING_WINDOW_START = dt_time(hour=13, minute=30)
-TRADING_WINDOW_END = dt_time(hour=14, minute=30)
-
-# Load config at startup
 CONFIG = get_config()
 POLYGON_API_KEY = CONFIG.get('POLYGON_API_KEY')
-
-# Derived: True when config was loaded from .config (local), False when env-only (e.g. Railway)
 IS_LOCAL = bool(CONFIG.get("_FROM_FILE"))
-
-# Signal consistency: track whether we've already sent a webhook today.
-# Once a webhook fires, Option Alpha creates a label and places a trade.
-# Subsequent pokes within the same day are logged but do NOT fire webhooks.
-# Option Alpha VIX gate: OA will not open positions when VIX >= this value
-OA_VIX_GATE = 25
-
-_daily_signal_cache = {'date': None, 'webhook_sent': False, 'signal': None, 'score': None, 'poke_count': 0}
-TRADING_WINDOW_LABEL = "24 hours (local testing)" if IS_LOCAL else "Mon-Fri, 1:30 PM - 2:30 PM ET"
 ENVIRONMENT_LABEL = "Local (Test)" if IS_LOCAL else "Railway Production"
-POKE_LABEL = "Disabled (local testing — trigger manually)" if IS_LOCAL else "Active (every 20 min in window)"
-# OpenAI model in use (default gpt-4o-mini if not set)
-OPENAI_MODEL_DISPLAY = (CONFIG.get("OPENAI_MODEL") or "").strip() or "gpt-4o-mini"
+
+# Register all desk routes
+for desk in ACTIVE_DESKS:
+    desk.register_routes(app)
+
 
 # ============================================================================
-# TRADING WINDOW CHECK
-# ============================================================================
-
-def is_within_trading_window(now=None):
-    """Check if within 1:30-2:30 PM ET trading window on weekdays (Mon-Fri).
-    When config is loaded from .config (local), window is 24hr so you can test any time.
-    """
-    if now is None:
-        now = datetime.now(ET_TZ)
-
-    # Local: config from .config → 24hr window for testing
-    if CONFIG.get("_FROM_FILE"):
-        return True
-
-    # Production: enforce Mon–Fri 1:30–2:30 PM ET
-    if now.weekday() >= 5:  # Saturday or Sunday
-        return False
-    current_time = now.time()
-    return TRADING_WINDOW_START <= current_time <= TRADING_WINDOW_END
-
-# ============================================================================
-# FLASK ROUTES
+# SHARED ROUTES
 # ============================================================================
 
 @app.route("/", methods=["GET"])
 def homepage():
-    """Homepage - Concise, Professional, Holistic"""
+    """Tabbed firm dashboard."""
     now = datetime.now(ET_TZ)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
     status_class = "status status-local" if IS_LOCAL else "status status-production"
-    status_text = "LOCAL (TEST) · 24hr trading window" if IS_LOCAL else "PRODUCTION · Mon–Fri 1:30–2:30 PM ET"
+    status_text = "LOCAL (TEST)" if IS_LOCAL else "PRODUCTION"
+
+    # Build desk tabs and content
+    tab_buttons = ['<button class="tab-btn active" onclick="switchTab(\'overview\')">Overview</button>']
+    tab_contents = []
+
+    for desk in ACTIVE_DESKS:
+        tab_id = desk.desk_id
+        tab_buttons.append(
+            f'<button class="tab-btn" onclick="switchTab(\'{tab_id}\')">{desk.display_name}</button>'
+        )
+        tab_contents.append(f"""
+        <div class="tab-content" id="tab-{tab_id}" style="display:none;">
+            {desk.get_dashboard_html()}
+        </div>
+        """)
+
+    # Overview tab: desk cards
+    desk_cards = ""
+    for desk in ACTIVE_DESKS:
+        health = desk.get_health()
+        last_signal = health.get('last_signal') or 'None today'
+        last_score = health.get('last_score')
+        score_str = f"{last_score:.1f}" if last_score is not None else "-"
+        desk_cards += f"""
+        <div class="desk-card">
+            <div class="desk-card-title">{desk.display_name}</div>
+            <div class="desk-card-desc">{desk.description}</div>
+            <div class="desk-card-stats">
+                <span>Last Signal: <strong>{last_signal}</strong></span>
+                <span>Score: <strong>{score_str}</strong></span>
+                <span>Pokes today: <strong>{health.get('poke_count', 0)}</strong></span>
+            </div>
+        </div>
+        """
+
+    poke_label = "Disabled (local testing)" if IS_LOCAL else "Active (multi-desk scheduler)"
+    trading_windows = ", ".join(
+        f"{d.display_name}: {d.window_start.strftime('%I:%M %p')}-{d.window_end.strftime('%I:%M %p')} ET"
+        for d in ACTIVE_DESKS
+    )
 
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Ren's SPX Vol Signal</title>
+        <title>Ren's Trading Firm</title>
         <style>
             body {{
                 font-family: 'Segoe UI', sans-serif;
-                max-width: 1000px;
+                max-width: 1100px;
                 margin: 40px auto;
                 padding: 20px;
                 background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
@@ -112,48 +106,64 @@ def homepage():
                 border-bottom: 3px solid #2a5298;
                 padding-bottom: 20px;
                 margin-bottom: 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
             }}
-            h1 {{ 
-                color: #1e3c72; 
-                margin: 0 0 10px 0;
-                font-size: 32px;
-            }}
-            .subtitle {{
-                color: #64748b;
-                font-size: 16px;
-                font-weight: 500;
+            h1 {{
+                color: #1e3c72;
+                margin: 0;
+                font-size: 28px;
             }}
             .status {{
                 display: inline-block;
-                padding: 10px 20px;
-                border-radius: 25px;
+                padding: 8px 16px;
+                border-radius: 20px;
                 font-weight: bold;
                 color: white;
-                margin-top: 15px;
+                font-size: 13px;
             }}
-            .status-production {{
-                background: #10b981;
+            .status-production {{ background: #10b981; }}
+            .status-local {{ background: #d97706; border: 2px solid #b45309; }}
+            .tab-bar {{
+                display: flex;
+                gap: 4px;
+                margin-bottom: 24px;
+                border-bottom: 2px solid #e2e8f0;
+                padding-bottom: 0;
             }}
-            .status-local {{
-                background: #d97706;
-                border: 2px solid #b45309;
+            .tab-btn {{
+                padding: 10px 20px;
+                border: none;
+                background: #f1f5f9;
+                color: #475569;
+                font-size: 14px;
+                font-weight: 600;
+                cursor: pointer;
+                border-radius: 8px 8px 0 0;
+                transition: all 0.2s;
+            }}
+            .tab-btn:hover {{ background: #e2e8f0; }}
+            .tab-btn.active {{
+                background: #2a5298;
+                color: white;
             }}
             .section {{
-                margin: 25px 0;
-                padding: 20px;
+                margin: 20px 0;
+                padding: 16px 20px;
                 background: #f8fafc;
                 border-radius: 8px;
                 border-left: 4px solid #2a5298;
             }}
             .section-title {{
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: 700;
                 color: #1e3c72;
-                margin: 0 0 15px 0;
+                margin: 0 0 12px 0;
             }}
             .info-item {{
-                margin: 8px 0;
-                padding: 8px 12px;
+                margin: 6px 0;
+                padding: 6px 10px;
                 background: white;
                 border-radius: 6px;
                 font-size: 14px;
@@ -164,572 +174,120 @@ def homepage():
                 display: inline-block;
                 min-width: 180px;
             }}
-            .info-value {{
-                color: #1e293b;
-            }}
+            .info-value {{ color: #1e293b; }}
             .strategy-box {{
                 background: #eff6ff;
                 border: 2px solid #3b82f6;
                 padding: 20px;
                 border-radius: 8px;
-                margin: 25px 0;
+                margin: 20px 0;
             }}
             .strategy-title {{
-                font-size: 20px;
+                font-size: 18px;
                 font-weight: 700;
                 color: #1e40af;
-                margin: 0 0 15px 0;
+                margin: 0 0 12px 0;
             }}
             .edge-item {{
-                padding: 10px 0;
+                padding: 8px 0;
                 border-bottom: 1px solid #cbd5e1;
             }}
-            .edge-item:last-child {{
-                border-bottom: none;
-            }}
-            .edge-label {{
-                font-weight: 600;
-                color: #1e40af;
-            }}
-            .edge-desc {{
-                color: #475569;
-                margin-top: 5px;
-                font-size: 14px;
-            }}
+            .edge-item:last-child {{ border-bottom: none; }}
+            .edge-label {{ font-weight: 600; color: #1e40af; }}
+            .edge-desc {{ color: #475569; margin-top: 4px; font-size: 14px; }}
             .endpoint {{
                 background: #f3f4f6;
-                padding: 14px;
-                margin: 10px 0;
+                padding: 12px;
+                margin: 8px 0;
                 border-radius: 6px;
                 font-family: monospace;
                 font-size: 14px;
             }}
-            .endpoint a {{ 
-                color: #2a5298; 
-                text-decoration: none; 
-                font-weight: bold; 
+            .endpoint a {{ color: #2a5298; text-decoration: none; font-weight: bold; }}
+            .endpoint a:hover {{ text-decoration: underline; }}
+            .desk-card {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 20px;
+                margin: 12px 0;
             }}
-            .endpoint a:hover {{
-                text-decoration: underline;
+            .desk-card-title {{
+                font-size: 16px;
+                font-weight: 700;
+                color: #1e3c72;
+                margin-bottom: 6px;
+            }}
+            .desk-card-desc {{
+                font-size: 13px;
+                color: #64748b;
+                margin-bottom: 10px;
+            }}
+            .desk-card-stats {{
+                display: flex;
+                gap: 24px;
+                font-size: 13px;
+                color: #334155;
             }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1>📊 Ren's SPX Vol Signal</h1>
-                <div class="subtitle">Automated SPX Overnight Iron Condor Decision System</div>
-                <div class="{status_class}">{status_text}</div>
+                <h1>Ren's Trading Firm</h1>
+                <span class="{status_class}">{status_text}</span>
             </div>
-            
-            <div class="strategy-box">
-                <div class="strategy-title">🎯 Trading Strategy: Overnight Vol Premium Capture</div>
 
-                <div class="edge-item">
-                    <div class="edge-label">📈 Core Edge:</div>
-                    <div class="edge-desc">
-                        Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility
-                        and overnight news risk is manageable. Capture theta decay + vol premium during the ~16-hour overnight period.
-                        Exit at 10:00 AM next day via Option Alpha time-based exit.
-                    </div>
-                </div>
+            <div class="tab-bar">
+                {''.join(tab_buttons)}
+            </div>
 
-                <div class="edge-item">
-                    <div class="edge-label">🔍 Signal Factors (3 Factors + Safety Layers):</div>
-                    <div class="edge-desc">
-                        <strong>1. IV/RV Ratio + Term Structure (30%):</strong> VIX1D vs 10-day RV, plus VIX1D/VIX inversion detection.<br>
-                        <strong>2. Market Trend (20%):</strong> 5-day momentum + intraday volatility (symmetric scoring).<br>
-                        <strong>3. AI News Analysis (50%):</strong> Triple-layer filtering → GPT risk scoring.<br>
-                        <strong>+ Contradiction Detection:</strong> Override to SKIP when indicators conflict dangerously.<br>
-                        <strong>+ Mag 7 Earnings Calendar:</strong> Auto-boost risk score when major earnings are due.<br>
-                        <strong>+ Confirmation Pass:</strong> Runs analysis twice, uses the more conservative result.
-                    </div>
+            <div class="tab-content" id="tab-overview">
+                {desk_cards}
+                <div class="section">
+                    <div class="section-title">System Information</div>
+                    <div class="info-item"><span class="info-label">Current Time:</span> <span class="info-value">{timestamp}</span></div>
+                    <div class="info-item"><span class="info-label">Trading Windows:</span> <span class="info-value">{trading_windows}</span></div>
+                    <div class="info-item"><span class="info-label">Environment:</span> <span class="info-value">{ENVIRONMENT_LABEL}</span></div>
+                    <div class="info-item"><span class="info-label">Scheduler:</span> <span class="info-value">{poke_label}</span></div>
                 </div>
+                <div class="section">
+                    <div class="section-title">Shared Endpoints</div>
+                    <div class="endpoint"><a href="/health">/health</a> - Health check (all desks)</div>
+                    <div class="endpoint"><a href="/test_polygon_delayed">/test_polygon_delayed</a> - Test Polygon data</div>
+                    <div class="endpoint"><a href="/test_slack">/test_slack</a> - Send test Slack alert</div>
+                </div>
+            </div>
 
-                <div class="edge-item">
-                    <div class="edge-label">⚡ Trade Sizing Logic:</div>
-                    <div class="edge-desc">
-                        <strong>AGGRESSIVE:</strong> Score &lt;3.5 → 20pt width, 0.18 delta<br>
-                        <strong>NORMAL:</strong> Score 3.5-5.0 → 25pt width, 0.16 delta<br>
-                        <strong>CONSERVATIVE:</strong> Score 5.0-7.5 → 30pt width, 0.14 delta<br>
-                        <strong>SKIP:</strong> Score ≥7.5 → No trade
-                    </div>
-                </div>
-
-                <div class="edge-item">
-                    <div class="edge-label">🔒 Webhook Safety:</div>
-                    <div class="edge-desc">
-                        Only one webhook fires per trading day. Once Option Alpha receives the signal and places the trade,
-                        subsequent poke cycles log data to Sheets but do not send duplicate webhooks.
-                    </div>
-                </div>
-            </div>
-            
-            <div class="section">
-                <div class="section-title">⚙️ System Information</div>
-                <div class="info-item">
-                    <span class="info-label">Current Time:</span>
-                    <span class="info-value">{timestamp}</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Trading Window:</span>
-                    <span class="info-value">{TRADING_WINDOW_LABEL}</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Environment:</span>
-                    <span class="info-value">{ENVIRONMENT_LABEL}</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Scheduler (POKE):</span>
-                    <span class="info-value">{POKE_LABEL}</span>
-                </div>
-            </div>
-            
-            <div class="section">
-                <div class="section-title">📡 Data Sources</div>
-                <div class="info-item">
-                    <span class="info-label">Market Data Provider:</span>
-                    <span class="info-value">Polygon/Massive Indices Starter ($49/mo)</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">SPX Data:</span>
-                    <span class="info-value">Real I:SPX snapshot + aggregates (15-min delayed)</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">VIX1D Data:</span>
-                    <span class="info-value">Real I:VIX1D snapshot (15-min delayed, 1-day forward IV)</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">VIX (30-day):</span>
-                    <span class="info-value">I:VIX for term structure analysis (contango vs inversion)</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">News Sources:</span>
-                    <span class="info-value">Yahoo Finance RSS + Google News RSS (FREE)</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">AI Analysis:</span>
-                    <span class="info-value">OpenAI ({OPENAI_MODEL_DISPLAY}), temperature=0.1</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Earnings Calendar:</span>
-                    <span class="info-value">Polygon ticker events API (Mag 7 earnings dates)</span>
-                </div>
-            </div>
-            
-            <div class="section">
-                <div class="section-title">🔗 API Endpoints</div>
-                <div class="endpoint"><a href="/health">/health</a> - Health check</div>
-                <div class="endpoint"><a href="/option_alpha_trigger">/option_alpha_trigger</a> - Generate trading signal</div>
-                <div class="endpoint"><a href="/test_polygon_delayed">/test_polygon_delayed</a> - Test Polygon data</div>
-                <div class="endpoint"><a href="/test_slack">/test_slack</a> - Send test Slack alert</div>
-            </div>
+            {''.join(tab_contents)}
         </div>
+
+        <script>
+        function switchTab(tabId) {{
+            document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + tabId).style.display = 'block';
+            event.target.classList.add('active');
+        }}
+        </script>
     </body>
     </html>
     """
     return html
 
+
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check"""
+    """Health check for all desks."""
     now = datetime.now(ET_TZ)
     return jsonify({
         "status": "healthy",
         "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
         "environment": "local" if IS_LOCAL else "production",
-        "trading_window": TRADING_WINDOW_LABEL,
-        "filtering": "Triple-layer (Algo dedup → Keyword → GPT)",
-        "market_data_source": "Polygon/Massive Indices Starter ($49/mo)",
-        "news_sources": "Yahoo Finance RSS + Google News RSS (FREE)",
-        "spx_data": "Real I:SPX (15-min delayed)",
-        "vix_data": "Real I:VIX1D (15-min delayed, 1-day forward IV)",
+        "desks": {desk.desk_id: desk.get_health() for desk in ACTIVE_DESKS},
         "alerting": get_alert_status(),
     }), 200
 
-@app.route("/option_alpha_trigger", methods=["GET", "POST"])
-def option_alpha_trigger():
-    """Main trading decision endpoint"""
-    now = datetime.now(ET_TZ)
-    timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-    
-    print(f"\n[{timestamp}] /option_alpha_trigger called")
-    
-    # Check trading window
-    if not is_within_trading_window(now):
-        return jsonify({
-            "status": "outside_window",
-            "message": "Outside trading window (" + ("24hr on local" if IS_LOCAL else "Mon-Fri, 1:30-2:30 PM ET") + ")",
-            "timestamp": timestamp,
-            "environment": "local" if IS_LOCAL else "production",
-        }), 200
-    
-    try:
-        print(f"[{timestamp}] Fetching market data from Polygon...")
-        
-        # Fetch SPX data (snapshot + aggregates)
-        spx_data = get_spx_data_with_retry(max_retries=3)
-        if not spx_data:
-            record_api_failure('Polygon_SPX')
-            return jsonify({"status": "error", "message": "SPX data failed after 3 retries (Polygon)"}), 500
-
-        # Fetch VIX1D data
-        vix1d_data = get_vix1d_with_retry(max_retries=3)
-        if not vix1d_data:
-            record_api_failure('Polygon_VIX1D')
-            return jsonify({"status": "error", "message": "VIX1D data failed after 3 retries (Polygon)"}), 500
-
-        # Fetch VIX (30-day) for term structure — non-critical, OK if it fails
-        vix_data = get_vix_with_retry(max_retries=2)
-
-        # Fetch VVIX (vol-of-vol) — non-critical, OK if it fails
-        vvix_data = get_vvix_with_retry(max_retries=2)
-
-        # Fetch and process news
-        print(f"[{timestamp}] Fetching news from RSS sources...")
-        raw_articles = fetch_news_raw()
-        
-        print(f"[{timestamp}] Processing news (deduplication + filtering)...")
-        news_data = process_news_pipeline(raw_articles)
-        
-        print(f"[{timestamp}] Analyzing factors...")
-        
-        # Use the signal engine to run all analysis
-        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data, vvix_data)
-        
-        factors = analysis_result['indicators']  # Internal: signal_engine uses 'indicators' key
-        composite = analysis_result['composite']
-        signal = analysis_result['signal']
-        contradictions = analysis_result.get('contradictions')
-        
-        iv_rv = factors['iv_rv']
-        trend = factors['trend']
-        gpt = factors['gpt']
-        
-        # Detailed logging for each factor
-        print(f"\n[{timestamp}] ========== FACTOR ANALYSIS ==========")
-        
-        # Factor 1: IV/RV Ratio (30% weight)
-        print(f"[{timestamp}] FACTOR 1: IV/RV Ratio (Weight: 30%)")
-        print(f"[{timestamp}]   - VIX1D (Implied Vol): {iv_rv['implied_vol']:.2f}%")
-        print(f"[{timestamp}]   - Realized Vol (10-day): {iv_rv['realized_vol']:.2f}%")
-        print(f"[{timestamp}]   - IV/RV Ratio: {iv_rv['iv_rv_ratio']:.3f}")
-        if 'rv_change' in iv_rv:
-            print(f"[{timestamp}]   - RV Change: {iv_rv['rv_change']*100:+.2f}%")
-        if 'term_structure_ratio' in iv_rv:
-            print(f"[{timestamp}]   - VIX (30-day): {iv_rv.get('vix_30d', 'N/A')}")
-            print(f"[{timestamp}]   - Term Structure: {iv_rv.get('term_structure', 'N/A')} (VIX1D/VIX = {iv_rv['term_structure_ratio']:.3f})")
-            if iv_rv.get('term_modifier', 0) > 0:
-                print(f"[{timestamp}]   - Term Structure Modifier: +{iv_rv['term_modifier']}")
-        print(f"[{timestamp}]   - Factor Score: {iv_rv['score']:.1f}/10")
-        print(f"[{timestamp}]   - Weighted Contribution: {iv_rv['score'] * 0.30:.2f}")
-        
-        # Factor 2: Market Trend (20% weight)
-        print(f"[{timestamp}] FACTOR 2: Market Trend (Weight: 20%)")
-        print(f"[{timestamp}]   - SPX Current: {spx_data['current']:.2f}")
-        print(f"[{timestamp}]   - SPX High Today: {spx_data['high_today']:.2f}")
-        print(f"[{timestamp}]   - SPX Low Today: {spx_data['low_today']:.2f}")
-        print(f"[{timestamp}]   - 5-Day Change: {trend['change_5d']*100:+.2f}%")
-        print(f"[{timestamp}]   - Intraday Range: {trend['intraday_range']*100:.2f}%")
-        print(f"[{timestamp}]   - Factor Score: {trend['score']:.1f}/10")
-        print(f"[{timestamp}]   - Weighted Contribution: {trend['score'] * 0.20:.2f}")
-        
-        # Factor 3: GPT News Analysis (50% weight)
-        print(f"[{timestamp}] FACTOR 3: GPT News Analysis (Weight: 50%)")
-        print(f"[{timestamp}]   - News Pipeline Stats:")
-        filter_stats = news_data.get('filter_stats', {})
-        print(f"[{timestamp}]     * Raw Articles Fetched: {filter_stats.get('raw_articles', 0)}")
-        print(f"[{timestamp}]     * Duplicates Removed: {filter_stats.get('duplicates_removed', 0)}")
-        print(f"[{timestamp}]     * Unique Articles: {filter_stats.get('unique_articles', 0)}")
-        print(f"[{timestamp}]     * Junk Filtered: {filter_stats.get('junk_filtered', 0)}")
-        print(f"[{timestamp}]     * Sent to GPT: {filter_stats.get('sent_to_gpt', 0)}")
-        print(f"[{timestamp}]   - GPT Analysis:")
-        print(f"[{timestamp}]     * Category: {gpt.get('category', 'UNKNOWN')}")
-        print(f"[{timestamp}]     * Key Risk: {gpt.get('key_risk', 'None')}")
-        print(f"[{timestamp}]     * Direction Risk: {gpt.get('direction_risk', 'UNKNOWN')}")
-        if 'duplicates_found' in gpt:
-            print(f"[{timestamp}]     * Duplicates Found by GPT: {gpt['duplicates_found']}")
-        print(f"[{timestamp}]   - Factor Score: {gpt['score']:.1f}/10")
-        print(f"[{timestamp}]   - Weighted Contribution: {gpt['score'] * 0.50:.2f}")
-        print(f"[{timestamp}]   - GPT Reasoning: {gpt.get('reasoning', 'N/A')[:200]}...")
-        
-        # Composite Score
-        print(f"\n[{timestamp}] ========== COMPOSITE SCORE ==========")
-        print(f"[{timestamp}] Composite Score: {composite['score']:.1f}/10")
-        print(f"[{timestamp}] Category: {composite['category']}")
-        print(f"[{timestamp}] Breakdown: ({iv_rv['score']:.1f} × 0.30) + ({trend['score']:.1f} × 0.20) + ({gpt['score']:.1f} × 0.50) = {composite['score']:.1f}")
-        
-        # ── Signal confirmation: run a second analysis pass ──
-        # GPT is non-deterministic. Before committing to a webhook (which
-        # triggers Option Alpha to place a real trade), run the signal pipeline
-        # a second time and use the MORE CONSERVATIVE of the two results.
-        # This costs one extra OpenAI call but prevents the worst case:
-        # a lucky low GPT score triggering an aggressive trade.
-        # The confirmation pass uses temperature=0.4 (vs 0.1 for primary)
-        # to genuinely test score robustness against sampling variance.
-        print(f"\n[{timestamp}] ========== CONFIRMATION PASS ==========")
-        print(f"[{timestamp}] Running second analysis for signal confirmation (temp=0.4)...")
-        time_module.sleep(2)  # brief delay between API calls
-
-        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data, vvix_data, gpt_temperature=0.4)
-        composite_2 = analysis_result_2['composite']
-        signal_2 = analysis_result_2['signal']
-        contradictions_2 = analysis_result_2.get('contradictions')
-
-        # Pick the more conservative (higher composite = more cautious)
-        tier_order = ['TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP']
-        idx_1 = tier_order.index(signal['signal']) if signal['signal'] in tier_order else 3
-        idx_2 = tier_order.index(signal_2['signal']) if signal_2['signal'] in tier_order else 3
-
-        # Capture confirmation pass data BEFORE signal/composite get overwritten
-        confirmation_pass_data = {
-            'pass1_composite': composite['score'],
-            'pass1_signal': signal['signal'],
-            'pass2_composite': composite_2['score'],
-            'pass2_signal': signal_2['signal'],
-            'passes_agreed': 'YES' if idx_1 == idx_2 else 'NO',
-        }
-
-        if idx_2 > idx_1:
-            # Second pass is more conservative — use it
-            print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
-            print(f"[{timestamp}] Pass 2: {signal_2['signal']} (score={composite_2['score']:.1f})")
-            print(f"[{timestamp}] → Using more conservative: {signal_2['signal']}")
-            signal = signal_2
-            composite = composite_2
-            contradictions = contradictions_2
-        elif idx_1 > idx_2:
-            print(f"[{timestamp}] Pass 1: {signal['signal']} (score={composite['score']:.1f})")
-            print(f"[{timestamp}] Pass 2: {signal_2['signal']} (score={composite_2['score']:.1f})")
-            print(f"[{timestamp}] → Using more conservative: {signal['signal']}")
-        else:
-            print(f"[{timestamp}] Both passes agree: {signal['signal']} ✓")
-        print(f"[{timestamp}] ========================================\n")
-
-        # ── Once-per-day webhook: only fire the first signal of each day ──
-        # Once OA receives a webhook, it creates a label and places a trade.
-        # Subsequent pokes on the same day are still logged (to Sheets) but
-        # do NOT fire another webhook — the trade is already placed.
-        today_str = now.strftime('%Y-%m-%d')
-        webhook_skipped = False
-
-        if _daily_signal_cache['date'] != today_str:
-            # New trading day — reset
-            _daily_signal_cache['date'] = today_str
-            _daily_signal_cache['webhook_sent'] = False
-            _daily_signal_cache['signal'] = None
-            _daily_signal_cache['score'] = None
-            _daily_signal_cache['poke_count'] = 0
-
-        _daily_signal_cache['poke_count'] += 1
-        poke_number = _daily_signal_cache['poke_count']
-
-        # Final Signal
-        print(f"\n[{timestamp}] ========== FINAL SIGNAL (Poke #{poke_number}) ==========")
-        print(f"[{timestamp}] Signal: {signal['signal']}")
-        print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
-        print(f"[{timestamp}] Reason: {signal['reason']}")
-
-        is_friday = now.weekday() == 4
-        vix_current = iv_rv.get('vix_30d')
-        vix_blocked = vix_current is not None and vix_current >= OA_VIX_GATE
-        oa_event_gates = check_oa_event_gates(now)
-
-        if is_friday:
-            # Friday: log signal to Sheets for validation, but do NOT send webhook
-            # (no live trades on Fridays — weekend theta decay risk)
-            webhook_skipped = True
-            trade_executed = "NO_FRIDAY"
-            print(f"[{timestamp}] Friday — signal logged for validation only, no webhook to Option Alpha.")
-            webhook = {'success': True, 'skipped': True, 'friday': True}
-        elif _daily_signal_cache['webhook_sent']:
-            # Already sent today — log only, no webhook
-            webhook_skipped = True
-            trade_executed = "NO_DUPLICATE"
-            prior = _daily_signal_cache['signal']
-            print(f"[{timestamp}] Webhook already sent today ({prior}). Logging only, no duplicate webhook.")
-            webhook = {'success': True, 'skipped': True}
-        else:
-            # First signal of the day — fire webhook (with retry)
-            webhook = send_webhook(signal)
-
-            if webhook.get('success'):
-                _daily_signal_cache['webhook_sent'] = True
-                _daily_signal_cache['signal'] = signal['signal']
-                _daily_signal_cache['score'] = composite['score']
-                print(f"[{timestamp}] Webhook fired: {signal['signal']} (attempts: {webhook.get('attempts', 1)})")
-            else:
-                # Webhook failed after all retries — alert and do NOT mark as sent
-                # so the next poke will retry
-                error_msg = webhook.get('error', 'Unknown error')
-                print(f"[{timestamp}] WEBHOOK FAILED after {webhook.get('attempts', 0)} attempts: {error_msg}")
-                from alerting import _send_alert
-                _send_alert(
-                    "Webhook Failed",
-                    f"Signal {signal['signal']} (score={composite['score']:.1f}) webhook failed "
-                    f"after {webhook.get('attempts', 0)} retries. Error: {error_msg}. "
-                    f"Next poke will retry.",
-                    level='critical',
-                )
-
-            # Determine actual trade execution status — check all OA gates
-            if signal['signal'] == 'SKIP':
-                trade_executed = "NO_SKIP"
-            elif not webhook.get('success'):
-                trade_executed = f"NO_WEBHOOK_FAIL ({webhook.get('error', 'unknown')[:40]})"
-            elif vix_blocked:
-                trade_executed = f"NO_VIX_GATE (VIX={vix_current:.1f})"
-                print(f"[{timestamp}] VIX={vix_current:.1f} >= {OA_VIX_GATE} — OA will block this trade")
-            elif oa_event_gates:
-                trade_executed = f"NO_OA_EVENT ({format_gate_reasons(oa_event_gates)})"
-                print(f"[{timestamp}] OA event gate active: {format_gate_reasons(oa_event_gates)}")
-            else:
-                trade_executed = "YES"
-
-        print(f"[{timestamp}] Trade Executed: {trade_executed}")
-        print(f"[{timestamp}] ======================================\n")
-
-        # Log contradiction detection
-        if contradictions and contradictions.get('contradiction_flags'):
-            print(f"\n[{timestamp}] ========== CONTRADICTION DETECTION ==========")
-            for flag in contradictions['contradiction_flags']:
-                print(f"[{timestamp}]   - {flag}")
-            if contradictions.get('override_signal'):
-                print(f"[{timestamp}]   >>> OVERRIDE: {contradictions['override_signal']}")
-            if contradictions.get('score_adjustment'):
-                print(f"[{timestamp}]   >>> ADJUSTMENT: +{contradictions['score_adjustment']}")
-            print(f"[{timestamp}] =============================================\n")
-
-        # Log to Google Sheet for history/backtesting (optional; no-op if not configured)
-        log_signal_to_sheets(
-            timestamp=timestamp,
-            signal=signal,
-            composite=composite,
-            iv_rv=iv_rv,
-            trend=trend,
-            gpt=gpt,
-            spx_current=spx_data["current"],
-            vix1d_current=vix1d_data["current"],
-            filter_stats=news_data.get("filter_stats", {}),
-            webhook_success=webhook.get("success", False),
-            contradictions=contradictions,
-            vix_current=vix_current,
-            trade_executed=trade_executed,
-            poke_number=poke_number,
-            earnings=analysis_result.get('earnings'),
-            confirmation_pass=confirmation_pass_data,
-        )
-
-        # Record successful signal for alerting
-        record_signal_success()
-
-        # Format news headlines
-        news_headlines = []
-        if news_data.get('articles'):
-            for article in news_data['articles'][:25]:
-                time_str = article['published_time'].strftime("%I:%M %p")
-                hours_ago = article['hours_ago']
-                
-                if hours_ago < 1:
-                    recency = "⚠️"
-                elif hours_ago < 3:
-                    recency = "🔸"
-                else:
-                    recency = "•"
-                
-                priority = "🔥" if article.get('priority') == 'HIGH' else ""
-                
-                news_headlines.append(f"{recency} [{time_str}] {priority}{article['title']}")
-        
-        # Get filter stats
-        filter_stats = news_data.get('filter_stats', {
-            'raw_articles': 0,
-            'duplicates_removed': 0,
-            'unique_articles': 0,
-            'junk_filtered': 0,
-            'sent_to_gpt': 0
-        })
-        
-        # Response
-        return jsonify({
-            "status": "success",
-            "timestamp": timestamp,
-            "environment": "local" if IS_LOCAL else "production",
-            
-            "decision": signal['signal'],
-            "composite_score": composite['score'],
-            "category": composite['category'],
-            "reason": signal['reason'],
-            
-            "market_data": {
-                "spx_current": spx_data['current'],
-                "spx_high": spx_data['high_today'],
-                "spx_low": spx_data['low_today'],
-                "vix1d_current": vix1d_data['current'],
-                "data_source": "Polygon/Massive Indices Starter ($49/mo)",
-                "timeframe": spx_data.get('timeframe', 'DELAYED')
-            },
-            
-            "factor_1_iv_rv": {
-                "weight": "30%",
-                "score": iv_rv['score'],
-                "iv_rv_ratio": iv_rv['iv_rv_ratio'],
-                "realized_vol": f"{iv_rv['realized_vol']}%",
-                "implied_vol": f"{iv_rv['implied_vol']}%",
-                "vix1d_value": iv_rv['vix1d_value'],
-                "tenor": "1-day (VIX1D)",
-                "source": "Polygon VIX1D (real data)",
-                "vix_30d": iv_rv.get('vix_30d'),
-                "term_structure": iv_rv.get('term_structure'),
-                "term_structure_ratio": iv_rv.get('term_structure_ratio'),
-            },
-            
-            "factor_2_trend": {
-                "weight": "20%",
-                "score": trend['score'],
-                "trend_change_5d": f"{trend['change_5d'] * 100:+.2f}%",
-                "intraday_range": f"{trend['intraday_range'] * 100:.2f}%"
-            },
-            
-            "factor_3_news_gpt": {
-                "weight": "50%",
-                
-                "triple_layer_pipeline": {
-                    "layer_1_algo_dedup": {
-                        "raw_articles_fetched": filter_stats['raw_articles'],
-                        "duplicates_removed": filter_stats['duplicates_removed'],
-                        "unique_articles": filter_stats['unique_articles']
-                    },
-                    "layer_2_keyword_filter": {
-                        "junk_filtered": filter_stats['junk_filtered'],
-                        "sent_to_gpt": filter_stats['sent_to_gpt']
-                    },
-                    "layer_3_gpt": {
-                        "duplicates_found_by_gpt": gpt.get('duplicates_found', 'None'),
-                        "description": "GPT triple-duty: duplication safety + commentary filter + risk analysis"
-                    }
-                },
-                
-                "headlines_analyzed": news_headlines,
-                
-                "gpt_analysis": {
-                    "score": gpt['score'],
-                    "category": gpt['category'],
-                    "key_risk": gpt.get('key_risk', 'None'),
-                    "direction": gpt.get('direction_risk', 'UNKNOWN'),
-                    "reasoning": gpt['reasoning']
-                }
-            },
-            
-            "webhook_success": webhook.get('success', False)
-            
-        }), 200
-        
-    except Exception as e:
-        print(f"[{timestamp}] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/test_polygon_delayed", methods=["GET"])
 def test_polygon_delayed():
@@ -737,62 +295,55 @@ def test_polygon_delayed():
     results = {
         'test_time': datetime.now(ET_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z'),
         'plan': 'Indices Starter ($49/mo) - 15-min delayed',
-        'note': 'Using official v3 snapshot + v2 aggregates endpoints'
     }
-    
+
     if not POLYGON_API_KEY:
         return jsonify({'error': 'No API key'}), 500
-    
-    # Test SPX snapshot
+
     spx_snapshot = get_spx_snapshot()
     results['spx_snapshot'] = {
-        'status': '✅ SUCCESS' if spx_snapshot else '❌ FAILED',
+        'status': 'SUCCESS' if spx_snapshot else 'FAILED',
         'data': spx_snapshot
     }
-    
-    # Test VIX1D snapshot
+
     vix1d_snapshot = get_vix1d_snapshot()
     results['vix1d_snapshot'] = {
-        'status': '✅ SUCCESS' if vix1d_snapshot else '❌ FAILED',
+        'status': 'SUCCESS' if vix1d_snapshot else 'FAILED',
         'data': vix1d_snapshot
     }
 
-    # Test VIX (30-day) snapshot
     vix_snapshot = get_vix_snapshot()
     results['vix_snapshot'] = {
-        'status': '✅ SUCCESS' if vix_snapshot else '❌ FAILED',
+        'status': 'SUCCESS' if vix_snapshot else 'FAILED',
         'data': vix_snapshot
     }
 
-    # Test SPX aggregates
     spx_agg = get_spx_aggregates()
     results['spx_aggregates'] = {
-        'status': '✅ SUCCESS' if spx_agg else '❌ FAILED',
+        'status': 'SUCCESS' if spx_agg else 'FAILED',
         'days_returned': len(spx_agg['closes']) if spx_agg else 0,
         'sample_closes': spx_agg['closes'][:5] if spx_agg else []
     }
-    
-    # Summary
+
     if spx_snapshot and vix1d_snapshot and spx_agg:
-        results['recommendation'] = '✅ POLYGON FULLY READY!'
         results['status'] = 'READY'
     else:
-        results['recommendation'] = '⚠️ Some data failed'
         results['status'] = 'PARTIAL'
-    
+
     return jsonify(results), 200
+
 
 @app.route("/test_slack", methods=["GET"])
 def test_slack():
     """Send a test alert to Slack to verify webhook configuration."""
-    from alerting import _send_alert
+    from core.alerting import _send_alert, _get_webhook_url
 
     now = datetime.now(ET_TZ)
     timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
 
     success = _send_alert(
         "Test Alert",
-        "This is a test alert from Ren's SPX Vol Signal. "
+        "This is a test alert from Ren's Trading Firm. "
         "If you see this in Slack, alerting is working correctly!",
         level='info',
     )
@@ -804,81 +355,21 @@ def test_slack():
             "timestamp": timestamp,
         }), 200
     else:
-        # Check if webhook is configured at all
-        from alerting import _get_webhook_url
         url = _get_webhook_url()
         if not url:
             return jsonify({
                 "status": "error",
-                "message": "ALERT_WEBHOOK_URL is not configured. "
-                           "Add it to .config [WEBHOOKS] section or set as env var.",
+                "message": "ALERT_WEBHOOK_URL is not configured.",
                 "timestamp": timestamp,
             }), 400
         else:
             return jsonify({
                 "status": "error",
-                "message": "Webhook is configured but the alert failed to send. "
-                           "Check that the URL is a valid Slack incoming webhook.",
+                "message": "Webhook is configured but the alert failed to send.",
                 "webhook_url_prefix": url[:40] + "...",
                 "timestamp": timestamp,
             }), 500
 
-# ============================================================================
-# BACKGROUND THREAD
-# ============================================================================
-
-def poke_self():
-    """Background thread: Trigger analysis during trading hours.
-    Not started when IS_LOCAL so one manual click = one run when testing.
-
-    First trigger of each day is randomized between 1:30-1:39 PM ET
-    (uniform distribution) to avoid predictable execution patterns.
-    Follow-up triggers at :50 and :10 remain fixed as fallbacks.
-    """
-    print("[POKE] Background thread started")
-    # Use same host/port as the app so it works when PORT is overridden (e.g. Railway)
-    base_url = os.environ.get("POKE_BASE_URL", "http://localhost:8080")
-    timeout_sec = int(os.environ.get("POKE_TIMEOUT", "300"))  # 5 min; GPT can be slow
-
-    # Per-day randomized first-poke minute (set fresh each trading day)
-    _poke_date = None
-    _first_poke_minute = 30  # default, overwritten each day
-
-    while True:
-        try:
-            now = datetime.now(ET_TZ)
-            current_time = now.time()
-            today_str = now.strftime('%Y-%m-%d')
-
-            # Pick a random first-poke minute for each new day (1:30–1:39 PM)
-            if _poke_date != today_str:
-                _poke_date = today_str
-                _first_poke_minute = random.randint(30, 39)
-                print(f"[POKE] Today's first trigger scheduled for 1:{_first_poke_minute:02d} PM ET")
-
-            # Reset alert dedup at midnight
-            if current_time.hour == 0 and current_time.minute == 0 and current_time.second < 30:
-                reset_daily()
-
-            if is_within_trading_window(now):
-                record_poke()
-                # First poke: randomized minute; follow-ups at :50 and :10
-                if current_time.minute in [_first_poke_minute, 50, 10] and current_time.second < 30:
-                    print(f"\n[POKE] Triggering at {now.strftime('%I:%M %p ET')}")
-                    try:
-                        requests.get(f"{base_url}/option_alpha_trigger", timeout=timeout_sec)
-                    except Exception as e:
-                        print(f"[POKE] Error: {e}")
-
-            # Check if window just ended (2:31-2:35 PM) and no signal was generated
-            if dt_time(14, 31) <= current_time <= dt_time(14, 35) and now.weekday() < 5:
-                check_end_of_window()
-
-            time_module.sleep(30)
-
-        except Exception as e:
-            print(f"[POKE] Background error: {e}")
-            time_module.sleep(60)
 
 # ============================================================================
 # MAIN
@@ -888,24 +379,17 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8080))
 
     print("=" * 80)
-    print("Ren's SPX Vol Signal - Production (Polygon/Massive)")
+    print("Ren's Trading Firm — Multi-Desk Signal System")
     print("=" * 80)
     print(f"Port: {PORT}")
-    print(f"Trading Window: {TRADING_WINDOW_LABEL}")
     print(f"Environment: {ENVIRONMENT_LABEL}")
-    print(f"Market Data: Polygon/Massive Indices Starter ($49/mo)")
-    print(f"News Sources: Yahoo Finance RSS + Google News RSS (FREE)")
-    print(f"SPX: Real I:SPX (15-min delayed)")
-    print(f"VIX1D: Real I:VIX1D (15-min delayed, 1-day forward IV)")
-    print(f"AI Analysis: OpenAI ({OPENAI_MODEL_DISPLAY})")
+    print(f"Active Desks: {len(ACTIVE_DESKS)}")
+    for desk in ACTIVE_DESKS:
+        print(f"  - {desk.display_name} ({desk.desk_id})")
+        print(f"    Window: {desk.window_start.strftime('%I:%M %p')}-{desk.window_end.strftime('%I:%M %p')} ET")
     print("=" * 80)
 
-    # Start POKE thread only in production so local = one click = one run
-    if not IS_LOCAL:
-        t = threading.Thread(target=poke_self, daemon=True)
-        t.start()
-        print("[POKE] Scheduler started (production)")
-    else:
-        print("[POKE] Scheduler disabled (local); trigger manually via /option_alpha_trigger")
+    # Start multi-desk scheduler
+    start_scheduler(ACTIVE_DESKS, is_local=IS_LOCAL)
 
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

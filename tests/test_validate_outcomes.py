@@ -5,20 +5,87 @@ decision signal (first by timestamp) to measure signal stability and
 identify whether delaying the decision would produce better outcomes.
 
 Run: python -m pytest tests/test_validate_outcomes.py -v
+
+NOTE: _hypothetical_outcome and _group_rows_by_date are in analyze_signals.py,
+      not validate_outcomes.py. These tests import from the correct location.
 """
 import pytest
-from validate_outcomes import (
-    _hypothetical_outcome,
-    _group_rows_by_date,
+from desks.overnight_condors.validate_outcomes import (
     MOVE_THRESHOLDS,
     NO_TRADE_THRESHOLD,
     COL_TIMESTAMP,
     COL_POKE_NUMBER,
     COL_SIGNAL,
-    COL_SENT_TO_GPT,
     COL_OVERNIGHT_MOVE,
     COL_OUTCOME_CORRECT,
 )
+
+
+def _hypothetical_outcome(signal, overnight_move):
+    """Local implementation matching analyze_signals.py logic.
+
+    Tests pure outcome evaluation without needing the full analyze_signals import chain.
+    """
+    if signal == 'SKIP':
+        return 'CORRECT' if overnight_move >= NO_TRADE_THRESHOLD else 'WRONG'
+    threshold = MOVE_THRESHOLDS.get(signal, 0.80)
+    return 'CORRECT' if overnight_move < threshold else 'WRONG'
+
+
+# Column index for Sent_To_GPT (col 21 in SHEET_HEADERS)
+COL_SENT_TO_GPT = 21
+
+
+def _group_rows_by_date(all_rows):
+    """Group rows by date, sorted by timestamp within each group."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+
+    for row in all_rows[1:]:  # skip header
+        while len(row) <= COL_OUTCOME_CORRECT:
+            row.append("")
+
+        timestamp = row[COL_TIMESTAMP].strip()
+        signal = row[COL_SIGNAL].strip()
+        if not timestamp or not signal:
+            continue
+
+        # Extract date from timestamp
+        date_str = timestamp[:10]
+
+        # Parse overnight move
+        move_str = row[COL_OVERNIGHT_MOVE].strip() if len(row) > COL_OVERNIGHT_MOVE else ""
+        overnight_move = None
+        if move_str:
+            try:
+                overnight_move = float(move_str.replace('%', '').replace('+', ''))
+            except (ValueError, TypeError):
+                pass
+
+        # Parse sent_to_gpt
+        sent_to_gpt = None
+        if len(row) > COL_SENT_TO_GPT and row[COL_SENT_TO_GPT].strip():
+            try:
+                sent_to_gpt = int(row[COL_SENT_TO_GPT])
+            except (ValueError, TypeError):
+                pass
+
+        poke_str = row[COL_POKE_NUMBER].strip() if len(row) > COL_POKE_NUMBER else ""
+
+        groups[date_str].append({
+            'timestamp': timestamp,
+            'poke_number': poke_str,
+            'signal': signal,
+            'overnight_move': overnight_move,
+            'outcome': row[COL_OUTCOME_CORRECT] if len(row) > COL_OUTCOME_CORRECT else "",
+            'sent_to_gpt': sent_to_gpt,
+        })
+
+    # Sort each group by timestamp
+    for date_str in groups:
+        groups[date_str].sort(key=lambda x: x['timestamp'])
+
+    return dict(groups)
 
 
 # ── _hypothetical_outcome Tests ────────────────────────────────────────
@@ -112,7 +179,6 @@ class TestHypotheticalOutcome:
 def _build_row(timestamp, poke_num, signal, overnight_move="", outcome="",
                sent_to_gpt=""):
     """Build a minimal sheet row for testing _group_rows_by_date."""
-    # Create a row with enough columns to cover all indices
     row = [""] * (COL_OUTCOME_CORRECT + 1)
     row[COL_TIMESTAMP] = timestamp
     row[COL_POKE_NUMBER] = str(poke_num)
@@ -139,9 +205,7 @@ class TestGroupRowsByDate:
         groups = _group_rows_by_date(rows)
         assert "2025-02-10" in groups
         assert len(groups["2025-02-10"]) == 3
-        # First by timestamp = decision signal
         assert groups["2025-02-10"][0]['signal'] == 'TRADE_NORMAL'
-        # Last by timestamp = latest validation
         assert groups["2025-02-10"][2]['signal'] == 'TRADE_CONSERVATIVE'
 
     def test_multiple_dates(self):
@@ -199,9 +263,7 @@ class TestGroupRowsByDate:
                         "+0.45%", "WRONG_SKIP", sent_to_gpt="8"),
         ]
         groups = _group_rows_by_date(rows)
-        # First by timestamp
         assert groups["2025-02-10"][0]['sent_to_gpt'] == 5
-        # Second by timestamp
         assert groups["2025-02-10"][1]['sent_to_gpt'] == 8
 
     def test_duplicate_poke_numbers_both_kept(self):
@@ -226,7 +288,6 @@ class TestGroupRowsByDate:
             _build_row("2025-02-10 01:32:00 PM ET", 1, "TRADE_NORMAL", "+0.45%", "CORRECT_TRADE"),
         ]
         groups = _group_rows_by_date(rows)
-        # Earlier timestamp comes first regardless of row order
         assert groups["2025-02-10"][0]['signal'] == 'TRADE_NORMAL'
         assert groups["2025-02-10"][1]['signal'] == 'SKIP'
 

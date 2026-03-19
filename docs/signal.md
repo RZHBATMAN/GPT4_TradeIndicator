@@ -1,6 +1,12 @@
 # Signal Logic Reference
 
-SPX overnight iron condor decision system. Three-factor composite score with contradiction detection, confirmation pass, and multiple safety gates.
+Multi-desk trading system. Each desk has its own signal pipeline.
+
+---
+
+# Desk 1: SPX Overnight Iron Condors
+
+Three-factor composite score with contradiction detection, confirmation pass, and multiple safety gates.
 
 Entry: 1:30-2:30 PM ET. Exit: 10:00 AM ET next day (~19.5-20.5 hour hold).
 
@@ -10,9 +16,9 @@ Entry: 1:30-2:30 PM ET. Exit: 10:00 AM ET next day (~19.5-20.5 hour hold).
 
 | Factor | Weight | Source |
 |--------|--------|--------|
-| IV/RV Ratio | 30% | `signals/iv_rv_ratio.py` |
-| Market Trend | 20% | `signals/market_trend.py` |
-| GPT News Analysis | 50% | `signals/gpt_news.py` |
+| IV/RV Ratio | 30% | `desks/overnight_condors/signals/iv_rv_ratio.py` |
+| Market Trend | 20% | `desks/overnight_condors/signals/market_trend.py` |
+| GPT News Analysis | 50% | `desks/overnight_condors/signals/gpt_news.py` |
 
 Composite = (IV/RV score x 0.30) + (Trend score x 0.20) + (GPT score x 0.50), clamped to [1.0, 10.0].
 
@@ -302,3 +308,46 @@ Directional indicator of the variance risk premium based on IV/RV ratio and RV c
 | RV change > +15% | COMPRESSING |
 | RV change < -15% | EXPANDING |
 | Otherwise | STABLE |
+
+---
+
+# Desk 2: 0DTE Afternoon Iron Butterflies
+
+Simple VIX-level based signal. Intentionally minimal — infrastructure placeholder.
+
+Entry: ~2:00 PM ET. Exit: expire same day at market close / 3:50 PM OA recipe.
+
+Source: `desks/afternoon_butterflies/signal_engine.py`
+
+---
+
+## 1. Signal Logic
+
+Single factor: VIX (30-day) level determines signal tier.
+
+| VIX Level | Signal | Score | Wing Width | Exit |
+|-----------|--------|-------|------------|------|
+| < 15 | TRADE_AGGRESSIVE | 2 | 5pt wings | Expire / 3:50 PM |
+| 15-20 | TRADE_NORMAL | 4 | 10pt wings | Expire / 3:50 PM |
+| 20-25 | TRADE_CONSERVATIVE | 6 | 15pt wings | Expire / 3:50 PM |
+| > 25 | SKIP | 9 | - | - |
+
+No GPT analysis, no confirmation pass, no contradiction detection. VIX unavailable = SKIP.
+
+## 2. Trading Window
+
+Mon-Fri 1:45-2:15 PM ET. Poke at :00 and :10 past the hour.
+
+## 3. Config
+
+Webhook URLs use `DESK2_` prefix in `.config`:
+- `DESK2_TRADE_AGGRESSIVE_URL`
+- `DESK2_TRADE_NORMAL_URL`
+- `DESK2_TRADE_CONSERVATIVE_URL`
+- `DESK2_NO_TRADE_URL`
+
+Desk 2 gracefully skips webhooks if URLs aren't configured.
+
+## 4. Sheets
+
+Logs to "0DTE_Butterflies" tab (auto-created on first write). Simplified ~13 columns.

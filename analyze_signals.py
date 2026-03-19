@@ -135,7 +135,12 @@ def load_signal_data() -> List[Dict[str, Any]]:
             row.append('')
 
         signal_tier = _get_col(row, 'Signal')
-        if not signal_tier:
+        # Filter out invalid/incomplete rows
+        if not signal_tier or signal_tier not in (
+            'TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP'
+        ):
+            continue
+        if not _get_col(row, 'Composite_Score') or not _get_col(row, 'Timestamp_ET'):
             continue
 
         entry = {
@@ -186,6 +191,15 @@ def load_signal_data() -> List[Dict[str, Any]]:
             'passes_agreed': _get_col(row, 'Passes_Agreed'),
             'gpt_tokens': _safe_int(_get_col(row, 'GPT_Tokens')),
             'gpt_cost': _safe_float(_get_col(row, 'GPT_Cost')),
+            # Phase 1: log-only indicators
+            'vvix': _safe_float(_get_col(row, 'VVIX')),
+            'vvix_elevated': _get_col(row, 'VVIX_Elevated'),
+            'overnight_rv': _safe_float(_get_col(row, 'Overnight_RV')),
+            'iv_overnight_rv_ratio': _safe_float(_get_col(row, 'IV_Overnight_RV_Ratio')),
+            'blended_overnight_vol': _safe_float(_get_col(row, 'Blended_Overnight_Vol')),
+            'student_t_breach_prob': _safe_float(_get_col(row, 'StudentT_Breach_Prob')),
+            'student_t_nu': _safe_float(_get_col(row, 'StudentT_Nu')),
+            'vrp_trend': _get_col(row, 'VRP_Trend'),
         }
         signals.append(entry)
 
@@ -561,22 +575,58 @@ def section_trades_placed(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'details': detail_items,
         })
 
-    # Recent trend (last 10 vs all-time)
-    if len(traded) >= 20:
-        recent = traded[-10:]
+    # Recent trend (last N vs all-time) — lowered from 20→8 trades
+    recent_n = min(5, len(traded))
+    if len(traded) >= 8 and recent_n >= 3:
+        recent = traded[-recent_n:]
         recent_wins = sum(1 for s in recent if 'CORRECT' in s['outcome'])
-        recent_rate = recent_wins / 10 * 100
+        recent_rate = recent_wins / recent_n * 100
         delta = recent_rate - win_rate
         direction = "improving" if delta > 5 else "declining" if delta < -5 else "stable"
-        subsections.append({
-            'title': 'Recent Trend (Last 10 Trades)',
+        recent_sub: Dict[str, Any] = {
+            'title': f'Recent Trend (Last {recent_n} Trades)',
             'kpis': [
-                {'label': 'Last 10 Win Rate', 'value': f"{recent_rate:.0f}%",
+                {'label': f'Last {recent_n} Win Rate', 'value': f"{recent_rate:.0f}%",
                  'sentiment': 'positive' if recent_rate >= 70 else 'warning' if recent_rate >= 50 else 'negative'},
                 {'label': 'All-Time Win Rate', 'value': f"{win_rate:.1f}%", 'sentiment': 'neutral'},
                 {'label': 'Trend', 'value': direction.upper(),
                  'sentiment': 'positive' if direction == 'improving' else 'negative' if direction == 'declining' else 'neutral'},
             ],
+        }
+        if len(traded) < 20:
+            recent_sub['callouts'] = [{'text': f'Low sample size ({len(traded)} trades). Treat trends with caution.', 'type': 'warning'}]
+        subsections.append(recent_sub)
+
+    # ── Enhanced P&L tracking (Phase 2, Step 2.5) ──
+    if traded:
+        running_pnl = []
+        cumulative = 0
+        best_day = float('-inf')
+        worst_day = float('inf')
+        for s in traded:
+            day_pnl = _pnl_for_trade(s['signal'], 'CORRECT' in s['outcome'])
+            cumulative += day_pnl
+            running_pnl.append(cumulative)
+            best_day = max(best_day, day_pnl)
+            worst_day = min(worst_day, day_pnl)
+
+        # Max drawdown
+        peak = running_pnl[0]
+        max_dd = 0
+        for val in running_pnl:
+            peak = max(peak, val)
+            dd = peak - val
+            max_dd = max(max_dd, dd)
+
+        pnl_kpis = [
+            {'label': 'Cumulative P&L', 'value': f"${cumulative:+,}", 'sentiment': 'positive' if cumulative > 0 else 'negative'},
+            {'label': 'Best Single Day', 'value': f"${best_day:+,}", 'sentiment': 'positive'},
+            {'label': 'Worst Single Day', 'value': f"${worst_day:+,}", 'sentiment': 'negative'},
+            {'label': 'Max Drawdown', 'value': f"${max_dd:,}", 'sentiment': 'warning' if max_dd > 0 else 'neutral'},
+        ]
+        subsections.append({
+            'title': 'P&L Trajectory',
+            'kpis': pnl_kpis,
         })
 
     # P&L note
@@ -852,7 +902,7 @@ def section_what_if(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         and s.get('trend_score') is not None
         and s.get('gpt_score') is not None
     ]
-    if len(valid_for_sweep) >= 10:
+    if len(valid_for_sweep) >= 5:
         current_correct = 0
         best_correct = 0
         best_config = (3.5, 5.0, 7.5)
@@ -1013,7 +1063,7 @@ def section_patterns(
         and s.get('gpt_score') is not None
         and s.get('overnight_move') is not None
     ]
-    if len(factor_data) >= 10:
+    if len(factor_data) >= 5:
         wins = [s for s in factor_data if 'CORRECT' in s['outcome']]
         losses = [s for s in factor_data if 'WRONG' in s['outcome']]
 
@@ -1060,6 +1110,36 @@ def section_patterns(
             'title': 'Factor Effectiveness',
             'text_blocks': [f"Analyzing {len(factor_data)} trades with complete factor data."],
             'tables': sub_tables,
+        })
+
+    # ── Factor Contribution Breakdown (Phase 2, Step 2.2) ──
+    factor_contrib_data = [
+        s for s in traded_with_outcomes
+        if s.get('iv_rv_score') is not None
+        and s.get('trend_score') is not None
+        and s.get('gpt_score') is not None
+    ]
+    if len(factor_contrib_data) >= 3:
+        contrib_rows = []
+        dominant_counts = defaultdict(int)
+        for s in factor_contrib_data:
+            iv_c = s['iv_rv_score'] * CURRENT_WEIGHTS['iv_rv']
+            tr_c = s['trend_score'] * CURRENT_WEIGHTS['trend']
+            gp_c = s['gpt_score'] * CURRENT_WEIGHTS['gpt']
+            total = iv_c + tr_c + gp_c
+            dominant = max([('IV/RV', iv_c), ('Trend', tr_c), ('GPT', gp_c)], key=lambda x: x[1])
+            dominant_counts[dominant[0]] += 1
+
+        dom_rows = [[name, str(count), _pct(count, len(factor_contrib_data))]
+                     for name, count in sorted(dominant_counts.items(), key=lambda x: -x[1])]
+        subsections.append({
+            'title': 'Factor Dominance',
+            'text_blocks': [f"Which factor contributes the most to the composite score across {len(factor_contrib_data)} signals."],
+            'tables': [{
+                'headers': ['Factor', 'Dominant Count', '% of Signals'],
+                'rows': dom_rows,
+                'col_classes': ['', 'num', 'num'],
+            }],
         })
 
     # ── Poke Stability ──
@@ -1241,6 +1321,403 @@ def _build_contradiction_analysis(
 
 
 # ============================================================================
+# NEW SECTIONS (Phase 2 & 3)
+# ============================================================================
+
+
+def section_signal_log(
+    signals: List[Dict], parts: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Section 5: Per-Signal Breakdown Table (Phase 2, Step 2.1).
+
+    Works with 1+ rows. No statistics — just show the data.
+    """
+    actionable = parts['all_actionable']
+    if not actionable:
+        return None
+
+    table_rows = []
+    for s in actionable:
+        date = _parse_date_from_timestamp(s.get('timestamp', '')) or '?'
+        signal = s.get('signal', '?').replace('TRADE_', '')
+        composite = f"{s['composite_score']:.1f}" if s.get('composite_score') is not None else '?'
+        iv_rv = f"{s['iv_rv_score']:.0f}" if s.get('iv_rv_score') is not None else '?'
+        trend = f"{s['trend_score']:.0f}" if s.get('trend_score') is not None else '?'
+        gpt = f"{s['gpt_score']:.0f}" if s.get('gpt_score') is not None else '?'
+        vix_str = f"{s['vix']:.1f}" if s.get('vix') is not None else '?'
+        vvix_str = f"{s['vvix']:.0f}" if s.get('vvix') is not None else '-'
+        move = f"{s['overnight_move']:.4f}%" if s.get('overnight_move') is not None else 'pending'
+        outcome = s.get('outcome', 'pending') or 'pending'
+        if outcome and 'CORRECT' in outcome:
+            outcome = 'OK'
+        elif outcome and 'WRONG' in outcome:
+            outcome = 'WRONG'
+
+        table_rows.append([date, signal, composite, iv_rv, trend, gpt, vix_str, vvix_str, move, outcome])
+
+    return {
+        'id': 'signal-log',
+        'title': '5. Signal Log (All Signals)',
+        'text_blocks': [f"Complete log of {len(actionable)} actionable signals."],
+        'tables': [{
+            'headers': ['Date', 'Signal', 'Score', 'IV/RV', 'Trend', 'GPT', 'VIX', 'VVIX', 'Move', 'Result'],
+            'rows': table_rows,
+            'col_classes': ['', '', 'num', 'num', 'num', 'num', 'num', 'num', 'num', ''],
+        }],
+    }
+
+
+def section_signal_trajectory(
+    signals: List[Dict], parts: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Section 6: Signal Trajectory Over Time (Phase 2, Step 2.3).
+
+    Shows composite score trend. Works with 2+ signals.
+    """
+    actionable = [s for s in parts['all_actionable'] if s.get('composite_score') is not None]
+    if len(actionable) < 2:
+        return None
+
+    table_rows = []
+    prev_score = None
+    consecutive_dir = 0
+    last_dir = None
+    regime_shifts = []
+
+    for s in actionable:
+        date = _parse_date_from_timestamp(s.get('timestamp', '')) or '?'
+        score = s['composite_score']
+        signal = s.get('signal', '?').replace('TRADE_', '')
+        delta = ''
+        if prev_score is not None:
+            d = score - prev_score
+            delta = f"{d:+.1f}"
+            # Track regime shifts
+            direction = 'up' if d > 0 else 'down' if d < 0 else 'flat'
+            if direction == last_dir and direction != 'flat':
+                consecutive_dir += 1
+            else:
+                consecutive_dir = 1
+                last_dir = direction
+            if consecutive_dir >= 3:
+                regime_shifts.append((date, direction))
+        prev_score = score
+        table_rows.append([date, f"{score:.1f}", delta, signal])
+
+    callouts = []
+    if regime_shifts:
+        for date, direction in regime_shifts[-3:]:  # show last 3
+            callouts.append({
+                'text': f"Regime shift detected near {date}: 3+ consecutive {direction} moves in composite score.",
+                'type': 'warning',
+            })
+
+    section: Dict[str, Any] = {
+        'id': 'trajectory',
+        'title': '6. Signal Trajectory',
+        'text_blocks': [f"Composite score evolution across {len(actionable)} signals."],
+        'tables': [{
+            'headers': ['Date', 'Score', 'Delta', 'Tier'],
+            'rows': table_rows,
+            'col_classes': ['', 'num', 'num', ''],
+        }],
+    }
+    if callouts:
+        section['callouts'] = callouts
+    return section
+
+
+def section_calibration(
+    parts: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Section 7: Brier Score & Signal Calibration (Phase 2, Step 2.6).
+
+    Treats composite score as implied risk probability.
+    Needs 10+ signals with outcomes.
+    """
+    all_with_out = _with_outcomes(parts['all_actionable'])
+    valid = [s for s in all_with_out if s.get('composite_score') is not None]
+    if len(valid) < 10:
+        return None
+
+    # Convert composite score to implied breach probability
+    # Score 1 → ~5%, Score 5 → ~35%, Score 7.5 → ~60%, Score 10 → ~85%
+    def _score_to_prob(score):
+        return min(0.95, max(0.05, (score - 1) * 0.089 + 0.05))
+
+    brier_sum = 0
+    cal_bins = defaultdict(lambda: {'predicted': [], 'actual': []})
+    student_t_brier_sum = 0
+    student_t_count = 0
+
+    for s in valid:
+        score = s['composite_score']
+        actual = 1 if 'WRONG' in s.get('outcome', '') else 0
+        predicted = _score_to_prob(score)
+        brier_sum += (predicted - actual) ** 2
+
+        # Bin by score range for ECE
+        bucket = min(9, int(score))  # 1-10 → bins 1-9
+        cal_bins[bucket]['predicted'].append(predicted)
+        cal_bins[bucket]['actual'].append(actual)
+
+        # Student-t comparison
+        if s.get('student_t_breach_prob') is not None:
+            st_pred = s['student_t_breach_prob']
+            student_t_brier_sum += (st_pred - actual) ** 2
+            student_t_count += 1
+
+    brier_score = brier_sum / len(valid)
+
+    # ECE
+    ece = 0
+    cal_rows = []
+    for bucket in sorted(cal_bins.keys()):
+        data = cal_bins[bucket]
+        pred_avg = _mean(data['predicted'])
+        actual_avg = _mean(data['actual'])
+        gap = abs(pred_avg - actual_avg)
+        ece += len(data['predicted']) / len(valid) * gap
+        cal_rows.append([
+            f"{bucket}-{bucket + 1}",
+            str(len(data['predicted'])),
+            f"{pred_avg * 100:.1f}%",
+            f"{actual_avg * 100:.1f}%",
+            f"{gap * 100:+.1f}%",
+        ])
+
+    kpis = [
+        {'label': 'Brier Score', 'value': f"{brier_score:.4f}",
+         'sentiment': 'positive' if brier_score < 0.20 else 'warning' if brier_score < 0.30 else 'negative'},
+        {'label': 'ECE', 'value': f"{ece:.4f}",
+         'sentiment': 'positive' if ece < 0.10 else 'warning' if ece < 0.20 else 'negative'},
+        {'label': 'Signals Used', 'value': str(len(valid)), 'sentiment': 'neutral'},
+    ]
+
+    subsections = []
+    if student_t_count >= 5:
+        st_brier = student_t_brier_sum / student_t_count
+        subsections.append({
+            'title': 'Heuristic vs Student-t Calibration',
+            'kpis': [
+                {'label': 'Heuristic Brier', 'value': f"{brier_score:.4f}", 'sentiment': 'neutral'},
+                {'label': 'Student-t Brier', 'value': f"{st_brier:.4f}",
+                 'sentiment': 'positive' if st_brier < brier_score else 'negative'},
+                {'label': 'Student-t Signals', 'value': str(student_t_count), 'sentiment': 'neutral'},
+            ],
+        })
+
+    callouts = []
+    if len(valid) < 20:
+        callouts.append({'text': f'Low sample size ({len(valid)} signals). Calibration metrics are preliminary.', 'type': 'warning'})
+
+    section: Dict[str, Any] = {
+        'id': 'calibration',
+        'title': '7. Signal Calibration',
+        'text_blocks': [
+            'How well-calibrated is the composite score as a risk probability? '
+            'Brier Score < 0.25 is good; ECE < 0.10 means score buckets match actual breach rates.'
+        ],
+        'kpis': kpis,
+        'tables': [{
+            'caption': 'Calibration by Score Bucket',
+            'headers': ['Score Range', 'Count', 'Predicted Breach%', 'Actual Breach%', 'Gap'],
+            'rows': cal_rows,
+            'col_classes': ['', 'num', 'num', 'num', 'num'],
+        }],
+    }
+    if subsections:
+        section['subsections'] = subsections
+    if callouts:
+        section['callouts'] = callouts
+    return section
+
+
+def section_edge_decay(
+    parts: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Section 8: Edge Decay Monitor (Phase 3, Step 3.1).
+
+    For each signal, compare implied overnight move (VIX1D/sqrt(252)) vs realized.
+    Needs 5+ signals with outcomes and VIX1D.
+    """
+    all_with_out = _with_outcomes(parts['all_actionable'])
+    valid = [s for s in all_with_out
+             if s.get('vix1d') is not None
+             and s.get('overnight_move') is not None]
+    if len(valid) < 5:
+        return None
+
+    ratios = []
+    table_rows = []
+    for s in valid:
+        implied_daily = s['vix1d'] / math.sqrt(252)  # VIX1D → daily % move
+        realized = s['overnight_move']
+        ratio = implied_daily / realized if realized > 0.001 else None
+        if ratio is not None:
+            ratios.append(ratio)
+        date = _parse_date_from_timestamp(s.get('timestamp', '')) or '?'
+        table_rows.append([
+            date,
+            f"{implied_daily:.4f}%",
+            f"{realized:.4f}%",
+            f"{ratio:.2f}" if ratio is not None else "N/A",
+        ])
+
+    avg_ratio = _mean(ratios) if ratios else 0
+
+    # Strategy health KPI
+    if avg_ratio > 1.3:
+        health = 'GREEN'
+        health_sentiment = 'positive'
+    elif avg_ratio > 1.0:
+        health = 'YELLOW'
+        health_sentiment = 'warning'
+    else:
+        health = 'RED'
+        health_sentiment = 'negative'
+
+    kpis = [
+        {'label': 'Strategy Health', 'value': health, 'sentiment': health_sentiment},
+        {'label': 'Avg Implied/Realized', 'value': f"{avg_ratio:.2f}",
+         'sentiment': health_sentiment},
+        {'label': 'Data Points', 'value': str(len(ratios)), 'sentiment': 'neutral'},
+    ]
+
+    callouts = []
+    if health == 'RED':
+        callouts.append({
+            'text': 'Implied vol is NOT overestimating realized moves. Edge may be gone. Consider pausing.',
+            'type': 'negative',
+        })
+    elif health == 'YELLOW':
+        callouts.append({
+            'text': 'Edge is narrowing. Monitor closely — consider tightening tiers.',
+            'type': 'warning',
+        })
+    if len(valid) < 20:
+        callouts.append({'text': f'Low sample size ({len(valid)} signals). Monitor as data grows.', 'type': 'warning'})
+
+    section: Dict[str, Any] = {
+        'id': 'edge-decay',
+        'title': '8. Edge Decay Monitor',
+        'text_blocks': [
+            'Is implied overnight vol still overestimating realized moves? '
+            'Ratio > 1.3 = healthy edge. Ratio < 1.0 = edge eroded.'
+        ],
+        'kpis': kpis,
+        'tables': [{
+            'caption': 'Implied vs Realized Overnight Move',
+            'headers': ['Date', 'Implied Move', 'Realized Move', 'Ratio'],
+            'rows': table_rows[-10:],  # last 10 for readability
+            'col_classes': ['', 'num', 'num', 'num'],
+        }],
+    }
+    if callouts:
+        section['callouts'] = callouts
+    return section
+
+
+def section_new_indicators(
+    parts: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Section 9: New Indicators Analysis (Phase 3, Step 3.2).
+
+    Correlate VVIX, overnight RV, VRP trend with outcomes.
+    Needs 10+ data points per indicator.
+    """
+    all_with_out = _with_outcomes(parts['all_actionable'])
+    if len(all_with_out) < 5:
+        return None
+
+    subsections = []
+
+    # VVIX correlation
+    vvix_data = [s for s in all_with_out if s.get('vvix') is not None and s.get('overnight_move') is not None]
+    if len(vvix_data) >= 10:
+        vvix_vals = [s['vvix'] for s in vvix_data]
+        moves = [s['overnight_move'] for s in vvix_data]
+        corr = _correlation(vvix_vals, moves)
+
+        elevated = [s for s in vvix_data if s['vvix'] > 120]
+        normal = [s for s in vvix_data if s['vvix'] <= 120]
+
+        rows = []
+        if normal:
+            n_wrong = sum(1 for s in normal if 'WRONG' in s['outcome'])
+            rows.append(['VVIX <= 120', str(len(normal)), _pct(n_wrong, len(normal)),
+                         f"{_mean([s['overnight_move'] for s in normal]):.4f}%"])
+        if elevated:
+            e_wrong = sum(1 for s in elevated if 'WRONG' in s['outcome'])
+            rows.append(['VVIX > 120', str(len(elevated)), _pct(e_wrong, len(elevated)),
+                         f"{_mean([s['overnight_move'] for s in elevated]):.4f}%"])
+
+        sub: Dict[str, Any] = {
+            'title': 'VVIX (Vol-of-Vol)',
+            'text_blocks': [f"Correlation with overnight move: {corr:+.3f}" if corr is not None else "Correlation: N/A"],
+            'tables': [{
+                'headers': ['VVIX Regime', 'Count', 'Breach Rate', 'Avg Move'],
+                'rows': rows,
+                'col_classes': ['', 'num', 'num', 'num'],
+            }] if rows else [],
+        }
+        subsections.append(sub)
+
+    # Overnight RV correlation
+    orv_data = [s for s in all_with_out if s.get('overnight_rv') is not None and s.get('overnight_move') is not None]
+    if len(orv_data) >= 10:
+        orv_vals = [s['overnight_rv'] for s in orv_data]
+        moves = [s['overnight_move'] for s in orv_data]
+        corr = _correlation(orv_vals, moves)
+        subsections.append({
+            'title': 'Overnight RV',
+            'text_blocks': [
+                f"Correlation with overnight move: {corr:+.3f}" if corr is not None else "Correlation: N/A",
+                f"Mean overnight RV: {_mean(orv_vals):.2f}%",
+            ],
+        })
+
+    # VRP Trend
+    vrp_data = [s for s in all_with_out if s.get('vrp_trend') and s['vrp_trend'] in ('EXPANDING', 'COMPRESSING', 'STABLE')]
+    if len(vrp_data) >= 10:
+        vrp_rows = []
+        for trend_val in ['EXPANDING', 'STABLE', 'COMPRESSING']:
+            group = [s for s in vrp_data if s['vrp_trend'] == trend_val]
+            if not group:
+                continue
+            g_wrong = sum(1 for s in group if 'WRONG' in s['outcome'])
+            g_moves = [s['overnight_move'] for s in group if s['overnight_move'] is not None]
+            vrp_rows.append([trend_val, str(len(group)), _pct(g_wrong, len(group)),
+                            f"{_mean(g_moves):.4f}%" if g_moves else "N/A"])
+
+        subsections.append({
+            'title': 'VRP Trend',
+            'tables': [{
+                'headers': ['VRP Trend', 'Count', 'Breach Rate', 'Avg Move'],
+                'rows': vrp_rows,
+                'col_classes': ['', 'num', 'num', 'num'],
+            }],
+        })
+
+    if not subsections:
+        return None
+
+    callouts = []
+    if len(all_with_out) < 20:
+        callouts.append({'text': 'Not enough data to activate indicators for scoring yet. Continue collecting.', 'type': 'warning'})
+
+    section: Dict[str, Any] = {
+        'id': 'new-indicators',
+        'title': '9. New Indicators (Log-Only)',
+        'text_blocks': ['Correlating log-only indicators with outcomes to determine which to activate for scoring.'],
+        'subsections': subsections,
+    }
+    if callouts:
+        section['callouts'] = callouts
+    return section
+
+
+# ============================================================================
 # TEXT RENDERING (for terminal output)
 # ============================================================================
 
@@ -1411,6 +1888,31 @@ def run_analysis(min_rows: int = 0) -> List[Dict[str, Any]]:
     s4 = section_patterns(signals, parts)
     if s4:
         result_sections.append(s4)
+
+    # Section 5: Signal Log (all signals, works with 1+ rows)
+    s5 = section_signal_log(signals, parts)
+    if s5:
+        result_sections.append(s5)
+
+    # Section 6: Signal Trajectory (works with 2+ signals)
+    s6 = section_signal_trajectory(signals, parts)
+    if s6:
+        result_sections.append(s6)
+
+    # Section 7: Calibration (needs 10+ signals with outcomes)
+    s7 = section_calibration(parts)
+    if s7:
+        result_sections.append(s7)
+
+    # Section 8: Edge Decay Monitor (needs 5+ signals with outcomes)
+    s8 = section_edge_decay(parts)
+    if s8:
+        result_sections.append(s8)
+
+    # Section 9: New Indicators Analysis (needs 10+ data points)
+    s9 = section_new_indicators(parts)
+    if s9:
+        result_sections.append(s9)
 
     return result_sections
 

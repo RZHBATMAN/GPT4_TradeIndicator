@@ -131,7 +131,7 @@ def generate_signal(composite_score, contradiction_result=None):
         }
 
 
-def run_signal_analysis(spx_data, vix1d_data, news_data, vix_data=None, gpt_temperature=0.1):
+def run_signal_analysis(spx_data, vix1d_data, news_data, vix_data=None, vvix_data=None, gpt_temperature=0.1):
     """Run all indicators and generate composite signal.
 
     Args:
@@ -139,7 +139,7 @@ def run_signal_analysis(spx_data, vix1d_data, news_data, vix_data=None, gpt_temp
             Default 0.1 for primary pass; confirmation pass uses 0.4.
     """
     # Run all three indicators
-    iv_rv = analyze_iv_rv_ratio(spx_data, vix1d_data, vix_data)
+    iv_rv = analyze_iv_rv_ratio(spx_data, vix1d_data, vix_data, vvix_data)
     trend = analyze_market_trend(spx_data)
     gpt = analyze_gpt_news(news_data, temperature=gpt_temperature)
 

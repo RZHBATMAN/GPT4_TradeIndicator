@@ -140,11 +140,13 @@ def get_spx_aggregates():
             print(f"  ❌ No SPX historical data")
             return None
         
-        closes = [bar['c'] for bar in data['results'][:25]]
-        
+        bars = data['results'][:25]
+        closes = [bar['c'] for bar in bars]
+        opens = [bar['o'] for bar in bars]
+
         print(f"  ✅ Got {len(closes)} days of SPX historical data")
-        
-        return closes
+
+        return {'closes': closes, 'opens': opens}
         
     except Exception as e:
         print(f"  ❌ SPX aggregates error: {e}")
@@ -244,12 +246,12 @@ def get_spx_data_with_retry(max_retries=3):
                 continue
             
             # Get historical data
-            historical_closes = get_spx_aggregates()
-            if not historical_closes:
+            historical = get_spx_aggregates()
+            if not historical:
                 print(f"  ⚠️ SPX historical data failed on attempt {attempt + 1}")
                 time_module.sleep(5)
                 continue
-            
+
             # Combine data
             result = {
                 'current': snapshot['current'],
@@ -257,7 +259,8 @@ def get_spx_data_with_retry(max_retries=3):
                 'low_today': snapshot['session'].get('low'),
                 'open_today': snapshot['session'].get('open'),
                 'previous_close': snapshot['session'].get('previous_close'),
-                'history_closes': historical_closes,
+                'history_closes': historical['closes'],
+                'history_opens': historical['opens'],
                 'timeframe': snapshot['timeframe'],
                 'market_status': snapshot['market_status']
             }
@@ -270,6 +273,83 @@ def get_spx_data_with_retry(max_retries=3):
             if attempt < max_retries - 1:
                 time_module.sleep(5)
     
+    return None
+
+
+def get_vvix_snapshot():
+    """
+    Fetch VVIX (VIX-of-VIX) current value from Polygon snapshot.
+    Used to detect elevated vol-of-vol — risk of overnight VIX spikes.
+    """
+    config = get_config()
+    polygon_api_key = config.get('POLYGON_API_KEY')
+
+    try:
+        print("  [POLYGON] Fetching VVIX snapshot...")
+
+        url = f"https://api.massive.com/v3/snapshot/indices?ticker.any_of=I:VVIX&apiKey={polygon_api_key}"
+        response = requests.get(url, timeout=15)
+
+        if response.status_code != 200:
+            print(f"  ❌ VVIX snapshot failed: {response.status_code}")
+            return None
+
+        data = response.json()
+
+        if 'results' not in data or len(data['results']) == 0:
+            print(f"  ❌ No VVIX results in snapshot")
+            return None
+
+        ticker_data = data['results'][0]
+
+        if 'error' in ticker_data:
+            print(f"  ❌ VVIX error: {ticker_data.get('error')}")
+            return None
+
+        if ticker_data.get('ticker') != 'I:VVIX':
+            print(f"  ❌ Unexpected ticker: {ticker_data.get('ticker')}")
+            return None
+
+        vvix_snapshot = {
+            'current': ticker_data.get('value'),
+            'session': ticker_data.get('session', {}),
+            'timeframe': ticker_data.get('timeframe'),
+            'market_status': ticker_data.get('market_status')
+        }
+
+        print(f"  ✅ VVIX: {vvix_snapshot['current']:.2f} ({vvix_snapshot['timeframe']})")
+
+        return vvix_snapshot
+
+    except Exception as e:
+        print(f"  ❌ VVIX snapshot error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_vvix_with_retry(max_retries=3):
+    """Fetch VVIX with retry. Returns None on failure (non-critical)."""
+    for attempt in range(max_retries):
+        try:
+            snapshot = get_vvix_snapshot()
+            if not snapshot:
+                if attempt < max_retries - 1:
+                    time_module.sleep(3)
+                continue
+
+            return {
+                'current': snapshot['current'],
+                'tenor': 'VVIX (vol-of-vol)',
+                'source': 'Polygon_VVIX',
+                'timeframe': snapshot['timeframe'],
+            }
+        except Exception as e:
+            print(f"  ❌ VVIX attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time_module.sleep(3)
+
+    print("  ⚠️ VVIX unavailable — vol-of-vol check skipped")
     return None
 
 

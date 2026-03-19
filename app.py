@@ -18,7 +18,7 @@ import requests
 
 # Import modular components
 from config.loader import get_config
-from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_vix_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_vix_snapshot, get_spx_aggregates
+from data.market_data import get_spx_data_with_retry, get_vix1d_with_retry, get_vix_with_retry, get_vvix_with_retry, get_spx_snapshot, get_vix1d_snapshot, get_vix_snapshot, get_vvix_snapshot, get_spx_aggregates
 from data.news_fetcher import fetch_news_raw
 from processing.pipeline import process_news_pipeline
 from signal_engine import run_signal_analysis
@@ -382,6 +382,9 @@ def option_alpha_trigger():
         # Fetch VIX (30-day) for term structure — non-critical, OK if it fails
         vix_data = get_vix_with_retry(max_retries=2)
 
+        # Fetch VVIX (vol-of-vol) — non-critical, OK if it fails
+        vvix_data = get_vvix_with_retry(max_retries=2)
+
         # Fetch and process news
         print(f"[{timestamp}] Fetching news from RSS sources...")
         raw_articles = fetch_news_raw()
@@ -392,7 +395,7 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Analyzing factors...")
         
         # Use the signal engine to run all analysis
-        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data)
+        analysis_result = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data, vvix_data)
         
         factors = analysis_result['indicators']  # Internal: signal_engine uses 'indicators' key
         composite = analysis_result['composite']
@@ -468,7 +471,7 @@ def option_alpha_trigger():
         print(f"[{timestamp}] Running second analysis for signal confirmation (temp=0.4)...")
         time_module.sleep(2)  # brief delay between API calls
 
-        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data, gpt_temperature=0.4)
+        analysis_result_2 = run_signal_analysis(spx_data, vix1d_data, news_data, vix_data, vvix_data, gpt_temperature=0.4)
         composite_2 = analysis_result_2['composite']
         signal_2 = analysis_result_2['signal']
         contradictions_2 = analysis_result_2.get('contradictions')
@@ -765,8 +768,8 @@ def test_polygon_delayed():
     spx_agg = get_spx_aggregates()
     results['spx_aggregates'] = {
         'status': '✅ SUCCESS' if spx_agg else '❌ FAILED',
-        'days_returned': len(spx_agg) if spx_agg else 0,
-        'sample_closes': spx_agg[:5] if spx_agg else []
+        'days_returned': len(spx_agg['closes']) if spx_agg else 0,
+        'sample_closes': spx_agg['closes'][:5] if spx_agg else []
     }
     
     # Summary

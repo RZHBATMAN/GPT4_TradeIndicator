@@ -29,17 +29,21 @@ from alerting import (
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _make_spx_data(current, high, low, closes=None):
+def _make_spx_data(current, high, low, closes=None, opens=None):
     """Build a minimal spx_data dict for testing."""
     if closes is None:
         # Generate flat prices for 25 days
         closes = [current] * 25
+    if opens is None:
+        # Default opens to match closes (no overnight gap)
+        opens = [c + 0.5 for c in closes]
     return {
         'current': current,
         'high_today': high,
         'low_today': low,
         'open_today': current,
         'history_closes': closes,
+        'history_opens': opens,
     }
 
 

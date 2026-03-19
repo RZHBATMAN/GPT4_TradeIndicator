@@ -68,6 +68,15 @@ SHEET_HEADERS = [
     "Pass2_Composite",
     "Pass2_Signal",
     "Passes_Agreed",
+    # ── Phase 1: Log-only indicators (appended at END) ──
+    "VVIX",
+    "VVIX_Elevated",
+    "Overnight_RV",
+    "IV_Overnight_RV_Ratio",
+    "Blended_Overnight_Vol",
+    "StudentT_Breach_Prob",
+    "StudentT_Nu",
+    "VRP_Trend",
 ]
 
 
@@ -261,6 +270,15 @@ def log_signal(
             confirmation_pass.get("pass2_composite", "") if confirmation_pass else "",  # Pass2_Composite
             confirmation_pass.get("pass2_signal", "") if confirmation_pass else "",     # Pass2_Signal
             confirmation_pass.get("passes_agreed", "") if confirmation_pass else "",    # Passes_Agreed
+            # ── Phase 1: Log-only indicators ──
+            iv_rv.get("vvix", ""),                                                        # VVIX
+            iv_rv.get("vvix_elevated", ""),                                               # VVIX_Elevated
+            iv_rv.get("overnight_rv", ""),                                                 # Overnight_RV
+            iv_rv.get("iv_overnight_rv_ratio", ""),                                        # IV_Overnight_RV_Ratio
+            iv_rv.get("blended_overnight_vol", ""),                                        # Blended_Overnight_Vol
+            iv_rv.get("student_t_breach_prob", ""),                                        # StudentT_Breach_Prob
+            iv_rv.get("student_t_nu", ""),                                                 # StudentT_Nu
+            iv_rv.get("vrp_trend", ""),                                                    # VRP_Trend
         ]
 
         ws.append_row(row, value_input_option="USER_ENTERED")

@@ -428,38 +428,40 @@ class OvernightCondorsDesk(Desk):
         <div class="strategy-box">
             <div class="strategy-title">SPX Overnight Iron Condors</div>
             <div class="edge-item">
-                <div class="edge-label">Core Edge:</div>
+                <div class="edge-label">Thesis:</div>
                 <div class="edge-desc">
-                    Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when implied volatility is rich relative to realized volatility
-                    and overnight news risk is manageable. Capture theta decay + vol premium during the ~16-hour overnight period.
-                    Exit at 10:00 AM next day via Option Alpha time-based exit.
+                    Selling the gap between the overnight move the market prices in and the overnight move
+                    that actually occurs. Implied vol systematically overprices realized overnight movement
+                    due to structural demand for portfolio protection.
                 </div>
             </div>
             <div class="edge-item">
-                <div class="edge-label">Signal Factors (3 Factors + Safety Layers):</div>
+                <div class="edge-label">Structure:</div>
                 <div class="edge-desc">
-                    <strong>1. IV/RV Ratio + Term Structure (30%):</strong> VIX1D vs 10-day RV, plus VIX1D/VIX inversion detection.<br>
-                    <strong>2. Market Trend (20%):</strong> 5-day momentum + intraday volatility (symmetric scoring).<br>
-                    <strong>3. AI News Analysis (50%):</strong> Triple-layer filtering -> GPT risk scoring.<br>
-                    <strong>+ Contradiction Detection:</strong> Override to SKIP when indicators conflict dangerously.<br>
-                    <strong>+ Mag 7 Earnings Calendar:</strong> Auto-boost risk score when major earnings are due.<br>
-                    <strong>+ Confirmation Pass:</strong> Runs analysis twice, uses the more conservative result.
+                    SPX iron condors, 1 DTE. Entry 1:30-2:30 PM ET, exit 10:00 AM ET next day (~19.5-20.5 hour hold).
+                    Width and delta determined by signal tier:
+                    AGGRESSIVE (&lt;3.5) 20pt/0.18d,
+                    NORMAL (3.5-5.0) 25pt/0.16d,
+                    CONSERVATIVE (5.0-7.5) 30pt/0.14d,
+                    SKIP (&gt;=7.5) no trade.
                 </div>
             </div>
             <div class="edge-item">
-                <div class="edge-label">Trade Sizing:</div>
+                <div class="edge-label">Risk:</div>
                 <div class="edge-desc">
-                    <strong>AGGRESSIVE:</strong> Score &lt;3.5 -> 20pt width, 0.18 delta<br>
-                    <strong>NORMAL:</strong> Score 3.5-5.0 -> 25pt width, 0.16 delta<br>
-                    <strong>CONSERVATIVE:</strong> Score 5.0-7.5 -> 30pt width, 0.14 delta<br>
-                    <strong>SKIP:</strong> Score &gt;=7.5 -> No trade
+                    Overnight tail events — Mag 7 earnings, Fed surprises, geopolitical shocks.
+                    Mitigated by 3-factor signal (IV/RV 30%, Trend 20%, GPT news 50%),
+                    contradiction detection, confirmation pass, Mag 7 earnings calendar,
+                    FOMC/CPI/NFP event gates, and Friday blackout.
                 </div>
             </div>
             <div class="edge-item">
-                <div class="edge-label">Webhook Safety:</div>
+                <div class="edge-label">Execution:</div>
                 <div class="edge-desc">
-                    Only one webhook fires per trading day. Once Option Alpha receives the signal and places the trade,
-                    subsequent poke cycles log data to Sheets but do not send duplicate webhooks.
+                    Signal-driven from this app via webhook to Option Alpha.
+                    OA handles strike selection, entry, and exit management
+                    (profit target, stop loss, time exit, touch monitor).
+                    One webhook per day; subsequent pokes log only.
                 </div>
             </div>
         </div>

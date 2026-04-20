@@ -58,6 +58,127 @@ def homepage():
         </div>
         """)
 
+    # OA-native desk tabs (not signal-driven from this app)
+    tab_buttons.append('<button class="tab-btn" onclick="switchTab(\'gex\')">GEX Desks</button>')
+    tab_buttons.append('<button class="tab-btn" onclick="switchTab(\'intraday_fly\')">Intraday Fly</button>')
+    tab_contents.append("""
+        <div class="tab-content" id="tab-gex" style="display:none;">
+            <div class="oa-badge">OA-Native</div>
+            <div class="strategy-box" style="border-color: #8b5cf6;">
+                <div class="strategy-title" style="color: #7c3aed;">GEX Wall Desk</div>
+                <div class="edge-item">
+                    <div class="edge-label">Thesis:</div>
+                    <div class="edge-desc">
+                        When dealers are net long gamma at a strike, their delta hedging suppresses price movement
+                        — buying dips and selling rallies. High-GEX strikes act as walls that pin price,
+                        creating a predictable range-bound environment for premium selling.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Structure:</div>
+                    <div class="edge-desc">
+                        Sell premium around identified GEX wall levels where dealer hedging
+                        is expected to suppress movement. Strike selection based on where
+                        gamma exposure is concentrated.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Risk:</div>
+                    <div class="edge-desc">
+                        GEX levels shift as options are traded throughout the day. A catalyst can
+                        overwhelm the dealer hedging flow, breaking through the wall. Requires
+                        accurate, timely GEX data to identify true wall levels.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Execution:</div>
+                    <div class="edge-desc">
+                        Fully managed on Option Alpha. OA handles signal generation, strike selection,
+                        entry timing, and exit management. No webhook from this app.
+                    </div>
+                </div>
+            </div>
+            <div class="strategy-box" style="border-color: #8b5cf6;">
+                <div class="strategy-title" style="color: #7c3aed;">GEX Snap Desk</div>
+                <div class="edge-item">
+                    <div class="edge-label">Thesis:</div>
+                    <div class="edge-desc">
+                        High-GEX strikes act as gravitational pillars — when price moves away,
+                        dealer hedging creates a force that pulls it back toward the pin.
+                        Trade the snap-back toward the GEX level, not the breakout away from it.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Structure:</div>
+                    <div class="edge-desc">
+                        Mean-reversion positions toward the GEX pillar. When price pulls away from
+                        a high-GEX strike, position for the snap back as dealer hedging
+                        attracts price toward the pin level.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Risk:</div>
+                    <div class="edge-desc">
+                        A catalyst strong enough to overwhelm dealer hedging flow — price moves away
+                        from the GEX level and keeps going. Requires accurate identification of
+                        true GEX pillars vs weak levels that won't hold.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Execution:</div>
+                    <div class="edge-desc">
+                        Fully managed on Option Alpha. OA handles signal generation, strike selection,
+                        entry timing, and exit management. No webhook from this app.
+                    </div>
+                </div>
+            </div>
+        </div>
+        """)
+
+    # Intraday Fly tab (OA-native)
+    tab_contents.append("""
+        <div class="tab-content" id="tab-intraday_fly" style="display:none;">
+            <div class="oa-badge">OA-Native</div>
+            <div class="strategy-box" style="border-color: #8b5cf6;">
+                <div class="strategy-title" style="color: #7c3aed;">Intraday Vol Overpricing Fly</div>
+                <div class="edge-item">
+                    <div class="edge-label">Thesis:</div>
+                    <div class="edge-desc">
+                        Selling the gap between the intraday move the market prices in and the intraday move
+                        that actually occurs, anchored to yesterday's close. 0DTE options systematically
+                        overprice realized intraday movement due to structural demand for portfolio hedging
+                        (variance risk premium).
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Structure:</div>
+                    <div class="edge-desc">
+                        0DTE iron butterfly centered at previous day's closing price. Entry at 10:00 AM ET
+                        (after opening auction noise settles and spreads tighten). Expire same day.
+                        Previous close is a natural anchor — last consensus price where all participants agreed,
+                        and dealer hedging / open interest concentrates around it, creating a magnet effect.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Risk:</div>
+                    <div class="edge-desc">
+                        Tail days — CPI surprises, Fed announcements, or breaking events that push SPX 2-3%
+                        in one direction. Iron fly max loss = width - credit. Backtest looks good because
+                        most days are range-bound, but tail losses can be large.
+                    </div>
+                </div>
+                <div class="edge-item">
+                    <div class="edge-label">Execution:</div>
+                    <div class="edge-desc">
+                        Fully managed on Option Alpha. OA handles entry at 10 AM, strike selection
+                        (centered at previous close), and exit management. No webhook from this app.
+                        Same vol overpricing thesis as Desk 1 (overnight condors) but different time window.
+                    </div>
+                </div>
+            </div>
+        </div>
+        """)
+
     # Overview tab: desk cards
     desk_cards = ""
     for desk in ACTIVE_DESKS:
@@ -74,6 +195,20 @@ def homepage():
                 <span>Score: <strong>{score_str}</strong></span>
                 <span>Pokes today: <strong>{health.get('poke_count', 0)}</strong></span>
             </div>
+        </div>
+        """
+
+    # OA-native desk cards for overview
+    desk_cards += """
+        <div class="desk-card" style="border-left: 3px solid #8b5cf6;">
+            <div class="desk-card-title">GEX Desks <span class="oa-badge-inline">OA-Native</span></div>
+            <div class="desk-card-desc">Dealer gamma exposure strategies — Wall (sell premium at pin levels) and Snap (mean-revert toward GEX pillars).</div>
+            <div class="desk-card-stats"></div>
+        </div>
+        <div class="desk-card" style="border-left: 3px solid #8b5cf6;">
+            <div class="desk-card-title">Intraday Vol Overpricing Fly <span class="oa-badge-inline">OA-Native</span></div>
+            <div class="desk-card-desc">Sell intraday vol overpricing via 0DTE iron fly anchored at previous close. Entry 10 AM ET.</div>
+            <div class="desk-card-stats"></div>
         </div>
         """
 
@@ -229,6 +364,26 @@ def homepage():
                 font-size: 13px;
                 color: #334155;
             }}
+            .oa-badge {{
+                display: inline-block;
+                background: #8b5cf6;
+                color: white;
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 11px;
+                font-weight: 700;
+                margin-bottom: 16px;
+            }}
+            .oa-badge-inline {{
+                background: #8b5cf6;
+                color: white;
+                padding: 2px 8px;
+                border-radius: 10px;
+                font-size: 10px;
+                font-weight: 600;
+                margin-left: 8px;
+                vertical-align: middle;
+            }}
         </style>
     </head>
     <body>
@@ -236,6 +391,7 @@ def homepage():
             <div class="header">
                 <h1>Ren's Trading Firm</h1>
                 <span class="{status_class}">{status_text}</span>
+                <div style="font-size: 13px; color: #64748b; margin-top: 8px; width: 100%;">All desks and strategies are under active development.</div>
             </div>
 
             <div class="tab-bar">

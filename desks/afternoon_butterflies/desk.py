@@ -184,27 +184,38 @@ class AfternoonButterfliesDesk(Desk):
         <div class="strategy-box">
             <div class="strategy-title">0DTE Afternoon Iron Butterflies</div>
             <div class="edge-item">
-                <div class="edge-label">Core Edge:</div>
+                <div class="edge-label">Thesis:</div>
                 <div class="edge-desc">
-                    Sell ATM SPX iron butterflies (0DTE) in the afternoon when VIX is within acceptable range.
-                    Entry ~2:00 PM ET, positions expire same day at market close.
-                    Captures end-of-day theta collapse on 0DTE options.
+                    Selling end-of-day theta collapse on 0DTE options. As expiration approaches,
+                    time value decays rapidly — iron butterflies capture this accelerating decay
+                    when VIX indicates manageable intraday risk.
                 </div>
             </div>
             <div class="edge-item">
-                <div class="edge-label">Signal Logic (VIX-based):</div>
+                <div class="edge-label">Structure:</div>
                 <div class="edge-desc">
-                    <strong>AGGRESSIVE:</strong> VIX &lt; 15 -> 5pt wings, score 2<br>
-                    <strong>NORMAL:</strong> VIX 15-20 -> 10pt wings, score 4<br>
-                    <strong>CONSERVATIVE:</strong> VIX 20-25 -> 15pt wings, score 6<br>
-                    <strong>SKIP:</strong> VIX &gt; 25 -> No trade, score 9
+                    ATM SPX iron butterfly, 0DTE. Entry ~2:00 PM ET, expire same day.
+                    Wing width sized by VIX level:
+                    AGGRESSIVE (VIX &lt;15) 5pt,
+                    NORMAL (15-20) 10pt,
+                    CONSERVATIVE (20-25) 15pt,
+                    SKIP (VIX &gt;25) no trade.
                 </div>
             </div>
             <div class="edge-item">
-                <div class="edge-label">Exit:</div>
+                <div class="edge-label">Risk:</div>
                 <div class="edge-desc">
-                    Positions expire at market close (4:00 PM) or close via OA recipe at 3:50 PM.
-                    No overnight risk — all positions are 0DTE.
+                    Late-day momentum moves or news-driven spikes in the final 2 hours.
+                    No overnight risk — all positions are 0DTE. VIX gate at 25 skips
+                    high-vol environments entirely.
+                </div>
+            </div>
+            <div class="edge-item">
+                <div class="edge-label">Execution:</div>
+                <div class="edge-desc">
+                    Signal-driven from this app via webhook to Option Alpha.
+                    OA handles strike selection and exit (expire or 3:50 PM close).
+                    One webhook per day.
                 </div>
             </div>
         </div>

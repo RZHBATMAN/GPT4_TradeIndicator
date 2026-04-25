@@ -261,9 +261,9 @@ Static date sets maintained in `data/oa_event_calendar.py`. When active, Option 
 
 Trade execution status is logged as `NO_OA_EVENT` with the specific gate reason.
 
-### 8.3 Friday Blackout
+### 8.3 Friday Trading
 
-No webhooks fire on Fridays. The signal is still computed and logged to Sheets for validation, but `trade_executed` is set to `NO_FRIDAY`. Rationale: weekend theta decay risk.
+Fridays trade normally. The overnight hold extends through the weekend (Friday PM → Monday 10 AM, ~64 hours). Weekend exposure is a known risk accepted in exchange for capturing the full week of trading opportunities. Historical `NO_FRIDAY` rows in the sheet are from when this gate was active.
 
 ### 8.4 Once-Per-Day Webhook
 

@@ -155,17 +155,11 @@ class OvernightCondorsDesk(Desk):
         print(f"[{timestamp}] Should Trade: {signal['should_trade']}")
         print(f"[{timestamp}] Reason: {signal['reason']}")
 
-        is_friday = now.weekday() == 4
         vix_current = iv_rv.get('vix_30d')
         vix_blocked = vix_current is not None and vix_current >= OA_VIX_GATE
         oa_event_gates = check_oa_event_gates(now)
 
-        if is_friday:
-            webhook_skipped = True
-            trade_executed = "NO_FRIDAY"
-            print(f"[{timestamp}] Friday -- signal logged for validation only, no webhook to Option Alpha.")
-            webhook = {'success': True, 'skipped': True, 'friday': True}
-        elif self._daily_signal_cache['webhook_sent']:
+        if self._daily_signal_cache['webhook_sent']:
             webhook_skipped = True
             trade_executed = "NO_DUPLICATE"
             prior = self._daily_signal_cache['signal']
@@ -450,9 +444,10 @@ class OvernightCondorsDesk(Desk):
                 <div class="edge-label">Risk:</div>
                 <div class="edge-desc">
                     Overnight tail events — Mag 7 earnings, Fed surprises, geopolitical shocks.
+                    Weekend holds (Friday entry → Monday exit) carry additional exposure.
                     Mitigated by 3-factor signal (IV/RV 30%, Trend 20%, GPT news 50%),
                     contradiction detection, confirmation pass, Mag 7 earnings calendar,
-                    FOMC/CPI/NFP event gates, and Friday blackout.
+                    and FOMC/CPI/NFP event gates.
                 </div>
             </div>
             <div class="edge-item">

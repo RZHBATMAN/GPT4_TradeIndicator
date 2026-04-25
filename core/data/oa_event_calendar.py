@@ -73,8 +73,8 @@ CPI_DATES = {
 # Source: https://www.bls.gov/schedule/news_release/empsit.htm
 # Overnight risk: Thursday PM entry → hold through Friday 8:30 AM NFP → 10 AM exit.
 # NFP surprises (>100K miss/beat) can move SPX 0.5%+ at open.
-# Note: Fridays are already blocked by the NO_FRIDAY gate in app.py,
-# so NFP_NEXT_DAY only fires on Thursdays (the day before NFP Friday).
+# NFP_NEXT_DAY fires on Thursdays (the day before NFP Friday).
+# On Fridays themselves, the trade fires normally but NFP has already been released at 8:30 AM.
 NFP_DATES = {
     # 2025
     '2025-01-10', '2025-02-07', '2025-03-07', '2025-04-04',

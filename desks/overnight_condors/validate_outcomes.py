@@ -21,9 +21,9 @@ Note on OA exit stack — positions may exit BEFORE 10 AM via:
 The Trade_Executed column tracks whether a trade was actually placed:
   YES           — webhook fired, OA executed the trade
   NO_SKIP       — our signal said SKIP
-  NO_FRIDAY     — Friday, no webhook sent
   NO_VIX_GATE   — VIX >= 25, OA blocked the trade
   NO_DUPLICATE  — webhook already sent earlier today
+  NO_FRIDAY     — legacy: Friday was previously blocked (no longer applies)
   (blank)       — legacy row before Trade_Executed was added
 
 Outcome classification:

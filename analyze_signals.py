@@ -425,7 +425,7 @@ def section_data_overview(
         ('Trade placed (YES)', 'traded'),
         ('Signal said SKIP', 'no_skip'),
         ('VIX Gate (VIX >= 25)', 'no_vix_gate'),
-        ('Friday Gate', 'no_friday'),
+        ('Friday Gate (legacy)', 'no_friday'),
         ('OA Event Gate', 'no_oa_event'),
     ]:
         count = len(parts[key])
@@ -687,7 +687,7 @@ def section_trades_not_placed(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]
         ('NO_VIX_GATE', 'no_vix_gate', 'VIX Gate (VIX >= 25)',
          'Option Alpha blocks trades when VIX >= 25.'),
         ('NO_FRIDAY', 'no_friday', 'Friday Gate',
-         'Fridays are blocked to avoid weekend risk.'),
+         'Fridays were previously blocked. No longer applies — included for historical data.'),
         ('NO_OA_EVENT', 'no_oa_event', 'OA Event Gate (FOMC/CPI/Early Close)',
          'Option Alpha blocks trades on FOMC, CPI, or early close days.'),
     ]
@@ -817,34 +817,7 @@ def section_what_if(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'callouts': sub_callouts if sub_callouts else None,
         })
 
-    # ── What if we removed the Friday gate? ──
-    friday_rows = _with_outcomes(parts['no_friday'])
-    if friday_rows:
-        # Use NORMAL tier as default
-        would_survive = sum(
-            1 for s in friday_rows
-            if s['overnight_move'] < MOVE_THRESHOLDS['TRADE_NORMAL']
-        )
-        would_blow = len(friday_rows) - would_survive
-        surv_rate = would_survive / len(friday_rows) * 100
-        hyp_pnl = (would_survive * PNL_PER_LOT['TRADE_NORMAL']['credit'] -
-                    would_blow * PNL_PER_LOT['TRADE_NORMAL']['max_loss'])
-
-        subsections.append({
-            'title': 'What if we removed the Friday gate?',
-            'text_blocks': [
-                f"Testing {len(friday_rows)} Friday nights as if we traded NORMAL (threshold={MOVE_THRESHOLDS['TRADE_NORMAL']:.2f}%):",
-            ],
-            'kpis': [
-                {'label': 'Would Survive', 'value': str(would_survive), 'sentiment': 'positive'},
-                {'label': 'Would Blow', 'value': str(would_blow),
-                 'sentiment': 'negative' if would_blow > 0 else 'positive'},
-                {'label': 'Survival Rate', 'value': f"{surv_rate:.0f}%",
-                 'sentiment': 'positive' if surv_rate >= 70 else 'warning'},
-                {'label': 'Hypothetical P&L', 'value': f"${hyp_pnl:+,}",
-                 'sentiment': 'positive' if hyp_pnl > 0 else 'negative'},
-            ],
-        })
+    # (Friday gate removed — Fridays now trade normally)
 
     # ── What if we removed the VIX gate? ──
     vix_rows = _with_outcomes(parts['no_vix_gate'])
@@ -998,9 +971,7 @@ def section_patterns(
             d_moves = [s['overnight_move'] for s in day_trades if s['overnight_move'] is not None]
             win_pct = d_wins / len(day_trades) * 100
             note = ""
-            if day == 'Friday':
-                note = " (blocked)"
-            elif len(day_trades) >= 5 and win_pct < 50:
+            if len(day_trades) >= 5 and win_pct < 50:
                 note = " LOW"
                 day_callouts.append({
                     'text': f"{day} has only {win_pct:.0f}% win rate with {len(day_trades)} trades. Consider adding a {day} gate.",

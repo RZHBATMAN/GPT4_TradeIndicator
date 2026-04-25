@@ -9,9 +9,9 @@ Regular operational tasks for keeping the signal system running and validated. T
 These happen on Railway without any intervention:
 
 - **Signal generation:** Poke thread triggers at a random time between 1:30-1:39 PM ET, then at :50 and :10 as fallbacks
-- **Webhook dispatch:** Fires to Option Alpha after the first signal each day (Mon-Thu only; Fridays are log-only)
-- **Sheets logging:** Appends a row to Google Sheets after every signal (all days including Friday)
-- **Trade_Executed tracking:** Logs whether a trade was actually placed (YES) or blocked (NO_SKIP, NO_FRIDAY, NO_VIX_GATE, NO_OA_EVENT)
+- **Webhook dispatch:** Fires to Option Alpha after the first signal each day (Mon-Fri)
+- **Sheets logging:** Appends a row to Google Sheets after every signal
+- **Trade_Executed tracking:** Logs whether a trade was actually placed (YES) or blocked (NO_SKIP, NO_VIX_GATE, NO_OA_EVENT)
 - **Contradiction detection:** Runs automatically as part of signal pipeline
 - **Earnings calendar check:** Queries Polygon for Mag 7 earnings before each signal
 - **Confirmation pass:** Runs analysis twice, picks conservative result

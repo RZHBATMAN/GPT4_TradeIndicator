@@ -62,7 +62,7 @@ Implementation: `analyze_gpt_news()` and `run_signal_analysis()` now accept a `t
 
 **Before:** FOMC and CPI were gated, but NFP was not. If you sell a condor Thursday afternoon and NFP drops at 8:30 AM Friday with a 100K+ surprise, the overnight move can blow through your condor.
 
-**After:** Added `NFP_DATES` set (36 dates, 2025-2027) and `NFP_NEXT_DAY` gate. Fires on Thursdays before NFP Friday. Fridays are already blocked by `NO_FRIDAY`, so this only affects Thursday entries.
+**After:** Added `NFP_DATES` set (36 dates, 2025-2027) and `NFP_NEXT_DAY` gate. Fires on Thursdays before NFP Friday. On NFP Friday itself, the trade fires normally (NFP has already been released at 8:30 AM before our 1:30 PM entry).
 
 The `Trade_Executed` column will now show `NO_OA_EVENT (NFP release tomorrow)` when active.
 
@@ -110,7 +110,7 @@ Polygon Massive Indices Starter provides 15-min delayed SPX/VIX1D/VIX. During vo
 - [ ] Import actual OA fills/exits for real PnL (vs 10 AM proxy)
 - [ ] Performance dashboard with historical charts
 - [ ] Regime detection: classify low-vol vs high-vol environments, adjust thresholds
-- [ ] Friday profitability analysis: how many skipped Fridays would have survived?
+- [ ] Friday/weekend profitability analysis: monitor Friday win rate vs other days
 - [ ] Poke timing optimization: analyze if first or later signal makes better decisions
 
 ### Phase 4 — Strategy Evolution

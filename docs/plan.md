@@ -73,8 +73,8 @@
 - **File:** `core/data/market_data.py`
 
 ### Friday signal accuracy
-- **Decide:** Do Friday signals have higher WRONG_TRADE rate due to 64-hour weekend exposure?
-- **When:** After 1-2 months. Filter outcomes by day-of-week. Add `FRIDAY_SCORE_MODIFIER` if significantly worse.
+- **Status:** Friday gate removed — Fridays now trade like any other day.
+- **Monitor:** Watch Friday win rate in day-of-week analysis. If significantly worse due to 64-hour weekend exposure, consider adding a `FRIDAY_SCORE_MODIFIER`.
 - **File:** `desks/overnight_condors/signal_engine.py`
 
 ### Paper vs live execution quality

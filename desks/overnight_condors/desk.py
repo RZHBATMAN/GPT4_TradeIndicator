@@ -336,13 +336,14 @@ class OvernightCondorsDesk(Desk):
         config = get_config()
         is_local = bool(config.get("_FROM_FILE"))
 
-        @app.route("/overnight/trigger", methods=["GET", "POST"])
+        # Canonical /{desk_id}/trigger route — convention enforced firm-wide
+        # (see memory/feedback_url_conventions.md).
+        @app.route("/overnight_condors/trigger", methods=["GET", "POST"])
         def overnight_condors_trigger():
             """Main trading decision endpoint for overnight condors."""
             now = datetime.now(ET_TZ)
             timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-
-            print(f"\n[{timestamp}] /overnight/trigger called")
+            print(f"\n[{timestamp}] /overnight_condors/trigger called")
 
             # Check trading window
             if not is_local and not self.is_within_window(now):
@@ -503,6 +504,6 @@ class OvernightCondorsDesk(Desk):
         </div>
         <div class="section">
             <div class="section-title">Endpoints</div>
-            <div class="endpoint"><a href="/overnight/trigger">/overnight/trigger</a> - Generate signal</div>
+            <div class="endpoint"><a href="/overnight_condors/trigger">/overnight_condors/trigger</a> - Generate signal</div>
         </div>
         """

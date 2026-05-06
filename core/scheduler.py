@@ -70,13 +70,9 @@ def start_scheduler(desks, base_url=None, is_local=False):
                         trigger_minutes = [first_min] + desk.poke_minutes[1:]
 
                         if current_time.minute in trigger_minutes and current_time.second < 30:
-                            # Determine trigger URL based on desk_id
-                            if desk_id == "overnight_condors":
-                                trigger_url = f"{base_url}/overnight/trigger"
-                            elif desk_id == "afternoon_butterflies":
-                                trigger_url = f"{base_url}/butterflies/trigger"
-                            else:
-                                trigger_url = f"{base_url}/{desk_id}/trigger"
+                            # All desks register at /{desk_id}/trigger — canonical convention.
+                            # See memory/feedback_url_conventions.md for the rule.
+                            trigger_url = f"{base_url}/{desk_id}/trigger"
 
                             print(f"\n[POKE] {desk_id}: Triggering at {now.strftime('%I:%M %p ET')}")
                             try:

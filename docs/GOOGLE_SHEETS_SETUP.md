@@ -123,7 +123,7 @@ GOOGLE_CREDENTIALS_JSON={"type":"service_account","project_id":"my-project",...}
 
 3. Save `.config`. Do **not** commit `.config` (it’s in `.gitignore`).
 
-4. Restart your local app and trigger a signal once (e.g. open `http://127.0.0.1:8080/overnight/trigger` or `http://127.0.0.1:8080/option_alpha_trigger`). Then open the Google Sheet and confirm a new row appeared in "Sheet1" (and that the first row is the header if the sheet was empty).
+4. Restart your local app and trigger a signal once (e.g. open `http://127.0.0.1:8080/overnight_condors/trigger`). Then open the Google Sheet and confirm a new row appeared in "Sheet1" (and that the first row is the header if the sheet was empty).
 
 ---
 
@@ -147,7 +147,7 @@ GOOGLE_CREDENTIALS_JSON={"type":"service_account","project_id":"my-project",...}
 
 5. **Redeploy** the service (e.g. trigger a deploy or push a commit) so the new variables are picked up.
 
-6. Test: open `https://your-app.railway.app/overnight/trigger` (or `/option_alpha_trigger`) once, then check the Google Sheet "Sheet1" tab for another new row.
+6. Test: open `https://your-app.railway.app/overnight_condors/trigger` once, then check the Google Sheet "Sheet1" tab for another new row.
 
 ---
 

@@ -605,9 +605,14 @@ class TestOutcomeEvaluation:
         assert move < 0.10  # Uses exit price, not close
 
     def test_oa_exit_params_documented(self):
-        """OA exit parameters are documented as constants."""
+        """OA exit parameters are documented as constants.
+        Confirmed current 2026-05-05: AGGR 25/120, NORMAL 20/100, CONSV 15/80.
+        """
         from desks.overnight_condors.validate_outcomes import OA_EXIT_PARAMS, OA_TIME_EXIT
-        assert OA_EXIT_PARAMS['TRADE_AGGRESSIVE']['profit_pct'] == 15
+        assert OA_EXIT_PARAMS['TRADE_AGGRESSIVE']['profit_pct'] == 25
+        assert OA_EXIT_PARAMS['TRADE_AGGRESSIVE']['stop_pct'] == 120
+        assert OA_EXIT_PARAMS['TRADE_NORMAL']['profit_pct'] == 20
         assert OA_EXIT_PARAMS['TRADE_NORMAL']['stop_pct'] == 100
-        assert OA_EXIT_PARAMS['TRADE_CONSERVATIVE']['profit_pct'] == 40
+        assert OA_EXIT_PARAMS['TRADE_CONSERVATIVE']['profit_pct'] == 15
+        assert OA_EXIT_PARAMS['TRADE_CONSERVATIVE']['stop_pct'] == 80
         assert OA_TIME_EXIT == '10:00'

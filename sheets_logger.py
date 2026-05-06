@@ -75,6 +75,12 @@ SHEET_HEADERS = [
     "StudentT_Breach_Prob",
     "StudentT_Nu",
     "VRP_Trend",
+    # ── Phase 2: Multi-bot parallel paper trial (appended at END) ──
+    "Desk_ID",            # Which bot fired: overnight_condors / asymmetric_condors / overnight_putspread / overnight_condors_vvix / overnight_condors_dow
+    "Structure_Label",    # Human-readable structure tag: "IC_25pt_0.16d", "asymmetric_IC", "put_spread", etc.
+    "Routed_Tier",        # Final tier label sent to OA after signal transform (differs from Signal for VVIX/DOW bots)
+    "VVIX_Bucket",        # LOW / NORMAL / HIGH / EXTREME (Bot D only; blank for others)
+    "DOW_Multiplier",     # Sizing multiplier from day-of-week: 1.0 / 1.5 / 0.0 (Bot E only; blank for others)
 ]
 
 
@@ -119,6 +125,12 @@ def log_signal(
     # Enriched logging (all optional with defaults for backward compatibility)
     earnings: Optional[Dict[str, Any]] = None,
     confirmation_pass: Optional[Dict[str, Any]] = None,
+    # Phase 2 multi-bot fields (all optional; default to "" for back-compat with desk 1 calls)
+    desk_id: str = "overnight_condors",
+    structure_label: str = "IC_default",
+    routed_tier: str = "",
+    vvix_bucket: str = "",
+    dow_multiplier: str = "",
 ) -> None:
     """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
     print("[Sheets] log_signal called")
@@ -199,6 +211,12 @@ def log_signal(
         iv_rv.get("student_t_breach_prob", ""),                                        # StudentT_Breach_Prob
         iv_rv.get("student_t_nu", ""),                                                 # StudentT_Nu
         iv_rv.get("vrp_trend", ""),                                                    # VRP_Trend
+        # ── Phase 2: Multi-bot parallel paper trial ──
+        desk_id,                                                                       # Desk_ID
+        structure_label,                                                               # Structure_Label
+        routed_tier or signal.get("signal", ""),                                       # Routed_Tier (falls back to original signal if no transform)
+        vvix_bucket,                                                                   # VVIX_Bucket
+        dow_multiplier,                                                                # DOW_Multiplier
     ]
 
     _core_log_signal("Sheet1", SHEET_HEADERS, row)

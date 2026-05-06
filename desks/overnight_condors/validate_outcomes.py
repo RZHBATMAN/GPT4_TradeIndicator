@@ -12,9 +12,12 @@ Exit price logic:
   2. Fallback: Daily open (9:30 AM) if minute data is unavailable
 
 Note on OA exit stack — positions may exit BEFORE 10 AM via:
-  - Profit target (Aggressive 15%, Normal 20%, Conservative 40% of credit)
-  - Stop loss (Aggressive 75%, Normal 100%, Conservative 150% of credit)
-  - Touch monitor (0 DTE: $40 ITM + <80% max loss)
+  - Profit target (Aggressive 25%, Normal 20%, Conservative 15% of credit)
+  - Stop loss (Aggressive 120%, Normal 100%, Conservative 80% of credit)
+  - Touch monitor: NOT USED on SPX (European cash-settled, no assignment risk)
+  Confirmed current as of 2026-05-05. Logic: more confident signal (AGGR) gets
+  wider exits (more room to work); less confident (CONSV) gets tighter exits
+  (bank quickly, cut losses fast).
   This validation uses the 10 AM price as a proxy since we don't have OA's
   actual fill/exit data. Directionally accurate but not exact.
 
@@ -70,15 +73,14 @@ TRADE_PARAMS = {
 # OA exit settings per tier (for reference — actual exits happen in OA)
 # Profit target = % of credit received; Stop loss = % of credit as loss
 # Time-based exit: 10:00 AM ET next day (hard close for all tiers)
-# Touch monitor (0 DTE only): close if $40+ ITM AND loss < 80% of max
+# Touch monitor: NOT USED on SPX (European cash-settled — no assignment risk)
+# Confirmed current 2026-05-05.
 OA_EXIT_PARAMS = {
-    'TRADE_AGGRESSIVE':   {'profit_pct': 15, 'stop_pct': 75},
+    'TRADE_AGGRESSIVE':   {'profit_pct': 25, 'stop_pct': 120},
     'TRADE_NORMAL':       {'profit_pct': 20, 'stop_pct': 100},
-    'TRADE_CONSERVATIVE': {'profit_pct': 40, 'stop_pct': 150},
+    'TRADE_CONSERVATIVE': {'profit_pct': 15, 'stop_pct': 80},
 }
 OA_TIME_EXIT = '10:00'       # ET — hard close for all tiers
-OA_TOUCH_ITM_AMOUNT = 40     # dollars ITM to trigger touch monitor
-OA_TOUCH_MAX_LOSS_PCT = 80   # don't close if loss already exceeds this %
 
 # Breakeven thresholds derived from delta:
 # Short strike distance ≈ delta * daily_vol * SPX_price (simplified)

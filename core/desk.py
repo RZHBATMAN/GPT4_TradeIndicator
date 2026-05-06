@@ -16,6 +16,16 @@ class Desk:
     display_name: str = ""                # "SPX Overnight Iron Condors"
     description: str = ""                 # One-line strategy description
 
+    # Optional: group multiple desks under one logical "Desk N" tab in the dashboard.
+    # When desk_group is None, the desk renders as its own standalone tab (back-compat).
+    # When set, all desks sharing the same desk_group are rendered together inside a
+    # single tab whose header is desk_group_label.
+    desk_group: str = None
+    desk_group_label: str = None
+    # status_label: short string shown next to the bot name in compact cards
+    # ('live', 'paper', 'oa-native'). Defaults to 'paper' for safety.
+    status_label: str = "paper"
+
     # Trading window
     window_start: dt_time = dt_time(13, 30)
     window_end: dt_time = dt_time(14, 30)

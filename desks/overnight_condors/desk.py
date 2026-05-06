@@ -34,8 +34,17 @@ OA_VIX_GATE = 25
 
 class OvernightCondorsDesk(Desk):
     desk_id = "overnight_condors"
-    display_name = "SPX Overnight Iron Condors"
-    description = "Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when IV is rich relative to RV and overnight news risk is manageable."
+    display_name = "Bot A — Symmetric IC (control)"
+    description = "Sell SPX iron condors (1:30-2:30 PM entry, 1 DTE) when IV is rich relative to RV and overnight news risk is manageable. Python signal control bot for the parallel paper trial."
+
+    # Multi-bot trial: structure tag for log attribution. Subclasses override.
+    structure_label = "IC_25pt_0.16d_symmetric"
+
+    # Desk 1 group membership (the firm's overnight VRP capture group)
+    desk_group = "desk1_overnight_vrp"
+    desk_group_label = "Desk 1 — Overnight Vol Premium Capture"
+    # paper, not live — the only live bot in this group is the OA-native Simple Condor
+    status_label = "paper"
 
     window_start = dt_time(13, 30)
     window_end = dt_time(14, 30)
@@ -52,6 +61,15 @@ class OvernightCondorsDesk(Desk):
             'TRADE_CONSERVATIVE': config.get('TRADE_CONSERVATIVE_URL'),
             'NO_TRADE': config.get('NO_TRADE_URL'),
         }
+
+    def transform_signal_for_routing(self, signal: Dict, ctx: Dict) -> Dict:
+        """Hook: rewrite signal['signal'] tier label before webhook routing.
+
+        Default is identity. Subclasses (e.g. VVIX-conditional, DOW-conditional bots)
+        override to map the standard tier into a structure-specific tier that routes
+        to a different OA recipe. ctx contains vvix_data, vix_data, now, etc.
+        """
+        return signal
 
     def run_signal_cycle(self, config: Dict) -> Dict:
         """Full pipeline: fetch market data -> news -> analyze -> signal."""
@@ -167,6 +185,12 @@ class OvernightCondorsDesk(Desk):
             webhook = {'success': True, 'skipped': True}
         else:
             webhook_urls = self.get_webhook_urls(config)
+            signal = self.transform_signal_for_routing(signal, ctx={
+                'vvix_data': vvix_data,
+                'vix_data': vix_data,
+                'spx_data': spx_data,
+                'now': now,
+            })
             webhook = send_webhook(signal, webhook_urls)
 
             if webhook.get('success'):
@@ -230,6 +254,13 @@ class OvernightCondorsDesk(Desk):
             poke_number=poke_number,
             earnings=analysis_result.get('earnings'),
             confirmation_pass=confirmation_pass_data,
+            # Phase 2 multi-bot fields (signal dict carries vvix_bucket / dow_multiplier
+            # if a transform hook set them; otherwise they default to "")
+            desk_id=self.desk_id,
+            structure_label=self.structure_label,
+            routed_tier=signal.get('signal', ''),
+            vvix_bucket=signal.get('vvix_bucket', ''),
+            dow_multiplier=signal.get('dow_multiplier', ''),
         )
 
         record_signal_success(desk_id=self.desk_id)

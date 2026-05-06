@@ -15,8 +15,6 @@ from desks.overnight_condors.validate_outcomes import (
     NO_TRADE_THRESHOLD,
     OA_EXIT_PARAMS,
     OA_TIME_EXIT,
-    OA_TOUCH_ITM_AMOUNT,
-    OA_TOUCH_MAX_LOSS_PCT,
     TRADE_PARAMS,
     COL_TIMESTAMP,
     COL_POKE_NUMBER,

@@ -140,13 +140,14 @@ class AfternoonButterfliesDesk(Desk):
         config = get_config()
         is_local = bool(config.get("_FROM_FILE"))
 
-        @app.route("/butterflies/trigger", methods=["GET", "POST"])
+        # Canonical /{desk_id}/trigger route — convention enforced firm-wide
+        # (see memory/feedback_url_conventions.md).
+        @app.route("/afternoon_butterflies/trigger", methods=["GET", "POST"])
         def afternoon_butterflies_trigger():
             """Signal endpoint for 0DTE butterflies."""
             now = datetime.now(ET_TZ)
             timestamp = now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-
-            print(f"\n[{timestamp}] /butterflies/trigger called")
+            print(f"\n[{timestamp}] /afternoon_butterflies/trigger called")
 
             if not is_local and not self.is_within_window(now):
                 return jsonify({
@@ -221,6 +222,6 @@ class AfternoonButterfliesDesk(Desk):
         </div>
         <div class="section">
             <div class="section-title">Endpoints</div>
-            <div class="endpoint"><a href="/butterflies/trigger">/butterflies/trigger</a> - Generate signal</div>
+            <div class="endpoint"><a href="/afternoon_butterflies/trigger">/afternoon_butterflies/trigger</a> - Generate signal</div>
         </div>
         """

@@ -64,7 +64,8 @@ class TestDeskRegistry:
         for desk in ACTIVE_DESKS:
             desk.register_routes(app)
 
-        # Check expected routes exist
+        # Check canonical /{desk_id}/trigger routes exist for every active desk.
         rules = [r.rule for r in app.url_map.iter_rules()]
-        assert '/overnight/trigger' in rules
-        assert '/butterflies/trigger' in rules
+        for desk in ACTIVE_DESKS:
+            expected = f'/{desk.desk_id}/trigger'
+            assert expected in rules, f'Missing canonical route for {desk.desk_id}: {expected}'

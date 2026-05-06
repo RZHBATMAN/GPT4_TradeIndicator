@@ -181,7 +181,7 @@ Usage: `python analyze_signals.py` (full report) or `python analyze_signals.py -
 
 ## How to Verify After Deploy
 
-1. Trigger `/overnight/trigger` (or `/option_alpha_trigger` backward compat) and check Railway logs:
+1. Trigger `/overnight_condors/trigger` and check Railway logs:
    - GPT prompt should show "1:30-2:30 PM ET entry" and "10:00 AM ET tomorrow"
    - Confirmation pass should log `temp=0.4`
    - Webhook should show retry attempts if it fails
@@ -195,7 +195,7 @@ Usage: `python analyze_signals.py` (full report) or `python analyze_signals.py -
    - "Sheet1" tab: Header row should auto-update with all columns; desk 1 signals log here
    - "0DTE_Butterflies" tab: auto-created on first desk 2 signal; simplified ~13 columns
 
-4. Trigger `/butterflies/trigger`:
+4. Trigger `/afternoon_butterflies/trigger`:
    - Should return VIX-based signal (TRADE_AGGRESSIVE/NORMAL/CONSERVATIVE/SKIP)
    - Should log to "0DTE_Butterflies" tab
    - Gracefully skips webhook if DESK2_* URLs not configured

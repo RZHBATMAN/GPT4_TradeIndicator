@@ -58,6 +58,17 @@ class OvernightCondorsDowDesk(OvernightCondorsDesk):
     desk_group_label = "Desk 1 — Overnight Vol Premium Capture"
     status_label = "paper"
 
+    # Bot E: tier × DOW sizing (per playbook §6.3). Baseline 2 contracts;
+    # BOOST (Mon/Fri) is 1.5× → 3.
+    CONTRACTS_BY_TIER = {
+        'TRADE_AGGRESSIVE_BOOST':   3,
+        'TRADE_AGGRESSIVE_NORMAL':  2,
+        'TRADE_NORMAL_BOOST':       3,
+        'TRADE_NORMAL_NORMAL':      2,
+        'TRADE_CONSERVATIVE_BOOST': 3,
+        'TRADE_CONSERVATIVE_NORMAL': 2,
+    }
+
     def get_webhook_urls(self, config: Dict) -> Dict[str, str]:
         """Webhook URLs keyed by tier_DOWvariant."""
         urls = {

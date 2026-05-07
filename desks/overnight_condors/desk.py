@@ -46,6 +46,13 @@ class OvernightCondorsDesk(Desk):
     # paper, not live — the only live bot in this group is the OA-native Simple Condor
     status_label = "paper"
 
+    # 1 contract across all tiers — Bot A's historical baseline.
+    CONTRACTS_BY_TIER = {
+        'TRADE_AGGRESSIVE':   1,
+        'TRADE_NORMAL':       1,
+        'TRADE_CONSERVATIVE': 1,
+    }
+
     window_start = dt_time(13, 30)
     window_end = dt_time(14, 30)
     window_days = [0, 1, 2, 3, 4]
@@ -236,7 +243,12 @@ class OvernightCondorsDesk(Desk):
                 print(f"[{timestamp}]   >>> ADJUSTMENT: +{contradictions['score_adjustment']}")
             print(f"[{timestamp}] =============================================\n")
 
-        # Log to Google Sheet
+        # Log to Google Sheet (unified "live" tab, name-keyed write).
+        # Conditional dimensions (vvix_bucket, dow_multiplier, hedge_attached,
+        # vvix_percentile, vvix_bucket_source, skip_reason, original_tier) ride
+        # on the `signal` dict — set by transform_signal_for_routing() in subclasses.
+        routed_tier = signal.get('signal', '')
+        contracts = self.CONTRACTS_BY_TIER.get(routed_tier)
         log_signal_to_sheets(
             timestamp=timestamp,
             signal=signal,
@@ -254,13 +266,9 @@ class OvernightCondorsDesk(Desk):
             poke_number=poke_number,
             earnings=analysis_result.get('earnings'),
             confirmation_pass=confirmation_pass_data,
-            # Phase 2 multi-bot fields (signal dict carries vvix_bucket / dow_multiplier
-            # if a transform hook set them; otherwise they default to "")
             desk_id=self.desk_id,
             structure_label=self.structure_label,
-            routed_tier=signal.get('signal', ''),
-            vvix_bucket=signal.get('vvix_bucket', ''),
-            dow_multiplier=signal.get('dow_multiplier', ''),
+            contracts=contracts,
         )
 
         record_signal_success(desk_id=self.desk_id)

@@ -1,95 +1,158 @@
-"""Backward-compat shim — keeps desk 1's SHEET_HEADERS and log_signal interface.
+"""Unified signal logger for the firm — every desk writes to the "live" tab.
 
-Delegates actual sheet writing to core.sheets.log_signal(tab, headers, row).
+This module is the single entry point every desk's run_signal_cycle() uses to
+log a signal to the Google Sheet. It owns:
+
+  - the canonical SHEET_HEADERS list (46 columns, in inspection order)
+  - the SHEET_TAB constant ("live")
+  - log_signal() which builds a name-keyed payload dict and dispatches to
+    core.sheets.log_signal_dict() — robust to column reordering and surfaces
+    schema drift via Slack alerts
+
+Schema design and column-by-column rationale: see
+~/.claude/projects/.../memory/feedback_sheets_columns.md and the conversation
+transcripts of 2026-05-06 / 2026-05-07.
 """
 import logging
-from typing import Any, Dict, List, Optional
+import os
+import subprocess
+from typing import Any, Dict, Optional
 
-from core.sheets import log_signal as _core_log_signal
+from core.sheets import log_signal_dict as _core_log_signal_dict
 
 logger = logging.getLogger(__name__)
 
-# Header row for the signal log sheet (same order as row values)
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema
+# ─────────────────────────────────────────────────────────────────────────────
+
+SHEET_TAB = "live"
+
 SHEET_HEADERS = [
+    # 1. Identity (4)
     "Timestamp_ET",
+    "Desk_ID",
     "Poke_Number",
+    "Day_Of_Week",
+
+    # 2. Signal output (6)
     "Signal",
-    "Should_Trade",
-    "Reason",
+    "Routed_Tier",
     "Composite_Score",
     "Category",
+    "Reason",
+    "Skip_Reason",
+
+    # 3. Structure & sizing (7)
+    "Structure_Label",
+    "Contracts",
+    "VVIX_Bucket",
+    "VVIX_Percentile",
+    "VVIX_Bucket_Source",
+    "DOW_Multiplier",
+    "Hedge_Attached",
+
+    # 4. Factor inputs (8)
     "IV_RV_Score",
     "IV_RV_Ratio",
-    "VIX1D",
-    "Realized_Vol_10d",
     "Trend_Score",
     "Trend_5d_Chg_Pct",
+    "Intraday_Range_Pct",
     "GPT_Score",
-    "GPT_Category",
+    "GPT_Direction_Risk",
     "GPT_Key_Risk",
-    "Webhook_Success",
+
+    # 5. Market context (6)
     "SPX_Current",
+    "VIX1D",
     "VIX",
-    "Trade_Executed",
-    "Raw_Articles",
-    "Sent_To_GPT",
-    "GPT_Reasoning",
-    # GPT cost tracking
-    "GPT_Tokens",
-    "GPT_Cost",
-    # Contradiction detection
+    "VVIX",
+    "Realized_Vol_10d",
+    "Term_Structure_Ratio",
+
+    # 6. Diagnostics (7)
     "Contradiction_Flags",
     "Override_Applied",
     "Score_Adjustment",
-    # Outcome tracking columns (filled later by validate_outcomes.py)
-    # SPX_Next_Open = exit price: 10 AM ET minute data when available, else daily open
+    "Passes_Agreed",
+    "Earnings_Modifier",
+    "Earnings_Tickers",
+    "GPT_Reasoning",
+
+    # 7. Operational status (2)
+    "Webhook_Success",
+    "Trade_Executed",
+
+    # 8. Outcome (4) — backfilled by validate_outcomes.py
     "SPX_Next_Open",
     "SPX_Next_Close",
     "Overnight_Move_Pct",
     "Outcome_Correct",
-    # ── Enriched logging columns (appended at END to avoid shifting existing data) ──
-    "Day_Of_Week",
-    "IV_RV_Base_Score",
-    "RV_Modifier",
-    "Term_Modifier",
-    "Term_Structure_Ratio",
-    "Trend_Base_Score",
-    "Intraday_Modifier",
-    "Intraday_Range_Pct",
-    "GPT_Raw_Score",
-    "GPT_Direction_Risk",
-    "Earnings_Modifier",
-    "Earnings_Tickers",
-    "GPT_Pre_Earnings_Score",
-    "Pass1_Composite",
-    "Pass1_Signal",
-    "Pass2_Composite",
-    "Pass2_Signal",
-    "Passes_Agreed",
-    # ── Phase 1: Log-only indicators (appended at END) ──
-    "VVIX",
-    "VVIX_Elevated",
-    "Overnight_RV",
-    "IV_Overnight_RV_Ratio",
-    "Blended_Overnight_Vol",
-    "StudentT_Breach_Prob",
-    "StudentT_Nu",
-    "VRP_Trend",
-    # ── Phase 2: Multi-bot parallel paper trial (appended at END) ──
-    "Desk_ID",            # Which bot fired: overnight_condors / asymmetric_condors / overnight_putspread / overnight_condors_vvix / overnight_condors_dow
-    "Structure_Label",    # Human-readable structure tag: "IC_25pt_0.16d", "asymmetric_IC", "put_spread", etc.
-    "Routed_Tier",        # Final tier label sent to OA after signal transform (differs from Signal for VVIX/DOW bots)
-    "VVIX_Bucket",        # LOW / NORMAL / HIGH / EXTREME (Bot D only; blank for others)
-    "DOW_Multiplier",     # Sizing multiplier from day-of-week: 1.0 / 1.5 / 0.0 (Bot E only; blank for others)
+
+    # 9. Provenance (2)
+    "Code_Version",
+    "Environment",
 ]
 
+# Sanity check — guard against accidental schema drift in code
+assert len(SHEET_HEADERS) == 46, (
+    f"SHEET_HEADERS expected 46 columns, got {len(SHEET_HEADERS)}. "
+    f"If you added a column intentionally, update this assertion AND the Sheet header row."
+)
+assert len(set(SHEET_HEADERS)) == len(SHEET_HEADERS), (
+    "SHEET_HEADERS contains duplicate column names"
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provenance helpers (Code_Version + Environment)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CODE_VERSION_CACHE: Optional[str] = None
+
+
+def _get_code_version() -> str:
+    """Return the current git short-SHA, cached for the process lifetime.
+
+    On Railway (or any env where .git isn't present), returns 'unknown'.
+    """
+    global _CODE_VERSION_CACHE
+    if _CODE_VERSION_CACHE is not None:
+        return _CODE_VERSION_CACHE
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        sha = (result.stdout or "").strip()
+        _CODE_VERSION_CACHE = sha or "unknown"
+    except Exception:
+        _CODE_VERSION_CACHE = "unknown"
+    return _CODE_VERSION_CACHE
+
+
+def _get_environment() -> str:
+    """Return 'local' or 'production' based on .config presence."""
+    try:
+        from core.config import get_config
+        return "local" if get_config().get("_FROM_FILE") else "production"
+    except Exception:
+        return "production"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers for normalizing payload values
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _ts_day_of_week(timestamp: str) -> str:
     """Extract day of week from timestamp string (e.g. 'Monday')."""
     try:
         from datetime import datetime as _dt
         for fmt in ["%Y-%m-%d %I:%M:%S %p %Z", "%Y-%m-%d %I:%M:%S %p EST",
-                     "%Y-%m-%d %I:%M:%S %p EDT", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+                    "%Y-%m-%d %I:%M:%S %p EDT", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
             try:
                 dt = _dt.strptime(timestamp.strip(), fmt)
                 return dt.strftime('%A')
@@ -100,11 +163,17 @@ def _ts_day_of_week(timestamp: str) -> str:
         return ""
 
 
-def _format_earnings_tickers(earnings: Dict[str, Any]) -> str:
-    """Format earnings tickers for Sheets column."""
-    tickers = earnings.get('reporting_today', []) + earnings.get('reporting_tomorrow', [])
-    return ', '.join(tickers) if tickers else 'None'
+def _format_earnings_tickers(earnings: Optional[Dict[str, Any]]) -> str:
+    """Format earnings tickers for the Sheet column."""
+    if not earnings:
+        return ""
+    tickers = earnings.get("reporting_today", []) + earnings.get("reporting_tomorrow", [])
+    return ", ".join(tickers) if tickers else "None"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
 
 def log_signal(
     *,
@@ -122,101 +191,118 @@ def log_signal(
     vix_current: Optional[float] = None,
     trade_executed: str = "",
     poke_number: int = 1,
-    # Enriched logging (all optional with defaults for backward compatibility)
     earnings: Optional[Dict[str, Any]] = None,
     confirmation_pass: Optional[Dict[str, Any]] = None,
-    # Phase 2 multi-bot fields (all optional; default to "" for back-compat with desk 1 calls)
+    # Multi-bot fields (every Phase 2 desk passes these from its transform hook)
     desk_id: str = "overnight_condors",
-    structure_label: str = "IC_default",
-    routed_tier: str = "",
-    vvix_bucket: str = "",
-    dow_multiplier: str = "",
+    structure_label: str = "IC_25pt_0.16d_symmetric",
+    contracts: Optional[int] = None,
 ) -> None:
-    """Append one signal row to the configured Google Sheet. No-op if not configured; never raises."""
-    print("[Sheets] log_signal called")
+    """Append one signal row to the "live" tab. Never raises; on failure sends
+    a critical Slack alert via core.alerting.
 
-    reasoning = (gpt.get("reasoning") or "")[:500]
+    Each desk's run_signal_cycle() calls this with whatever fields it has;
+    desks that don't compute a particular field (e.g. butterfly has no IV/RV)
+    pass empty dicts and the corresponding columns end up blank.
+    """
+    # ── Build the name-keyed payload ──
+    # Pull conditional dimensions stashed on the signal dict by transform hooks.
+    # (Desks that don't override transform_signal_for_routing leave these blank.)
+    routed_tier = signal.get("signal", "")  # post-transform tier
+    original_tier = signal.get("original_tier", routed_tier)  # pre-transform tier
+    # When original_tier is unset (Bot A/B/C — no transform), the original
+    # `signal['signal']` IS the original tier. Using routed_tier as fallback
+    # ensures both columns get populated correctly.
+    signal_tier = original_tier if original_tier else routed_tier
 
-    # Contradiction fields
+    contradiction_flags = ""
+    override = ""
+    score_adjustment = ""
     if contradictions:
-        flags_str = "; ".join(contradictions.get("contradiction_flags", [])) or "None"
+        contradiction_flags = "; ".join(contradictions.get("contradiction_flags", [])) or "None"
         override = contradictions.get("override_signal") or "None"
-        adj = contradictions.get("score_adjustment", 0)
-    else:
-        flags_str = "N/A"
-        override = "N/A"
-        adj = 0
+        score_adjustment = contradictions.get("score_adjustment", 0)
 
-    row: List[Any] = [
-        timestamp,
-        poke_number,
-        signal.get("signal", ""),
-        signal.get("should_trade", False),
-        signal.get("reason", ""),
-        composite.get("score", ""),
-        composite.get("category", ""),
-        iv_rv.get("score", ""),
-        iv_rv.get("iv_rv_ratio", ""),
-        iv_rv.get("implied_vol", ""),
-        iv_rv.get("realized_vol", ""),
-        trend.get("score", ""),
-        f"{(trend.get('change_5d') or 0) * 100:+.2f}%" if trend.get("change_5d") is not None else "",
-        gpt.get("score", ""),
-        gpt.get("category", ""),
-        gpt.get("key_risk", ""),
-        webhook_success,
-        spx_current,
-        vix_current if vix_current is not None else "",
-        trade_executed,
-        filter_stats.get("raw_articles", ""),
-        filter_stats.get("sent_to_gpt", ""),
-        reasoning,
-        # GPT cost columns
-        gpt.get("token_usage", {}).get("total", ""),
-        f"${gpt.get('token_usage', {}).get('cost', 0):.4f}" if gpt.get("token_usage", {}).get("cost") else "",
-        # Contradiction columns
-        flags_str,
-        override,
-        adj,
-        # Outcome columns — left blank, filled by validate_outcomes.py
-        "",  # SPX_Next_Open
-        "",  # SPX_Next_Close
-        "",  # Overnight_Move_Pct
-        "",  # Outcome_Correct
-        # ── Enriched logging columns ──
-        _ts_day_of_week(timestamp),                                             # Day_Of_Week
-        iv_rv.get("base_score", ""),                                            # IV_RV_Base_Score
-        iv_rv.get("rv_modifier", ""),                                           # RV_Modifier
-        iv_rv.get("term_modifier", ""),                                         # Term_Modifier
-        iv_rv.get("term_structure_ratio", ""),                                  # Term_Structure_Ratio
-        trend.get("base_score", ""),                                            # Trend_Base_Score
-        trend.get("intraday_modifier", ""),                                     # Intraday_Modifier
-        f"{(trend.get('intraday_range') or 0) * 100:.2f}%" if trend.get("intraday_range") is not None else "",  # Intraday_Range_Pct
-        gpt.get("raw_score", ""),                                              # GPT_Raw_Score
-        gpt.get("direction_risk", ""),                                          # GPT_Direction_Risk
-        earnings.get("risk_modifier", "") if earnings else "",                  # Earnings_Modifier
-        _format_earnings_tickers(earnings) if earnings else "",                 # Earnings_Tickers
-        gpt.get("pre_earnings_score", ""),                                     # GPT_Pre_Earnings_Score
-        confirmation_pass.get("pass1_composite", "") if confirmation_pass else "",  # Pass1_Composite
-        confirmation_pass.get("pass1_signal", "") if confirmation_pass else "",     # Pass1_Signal
-        confirmation_pass.get("pass2_composite", "") if confirmation_pass else "",  # Pass2_Composite
-        confirmation_pass.get("pass2_signal", "") if confirmation_pass else "",     # Pass2_Signal
-        confirmation_pass.get("passes_agreed", "") if confirmation_pass else "",    # Passes_Agreed
-        # ── Phase 1: Log-only indicators ──
-        iv_rv.get("vvix", ""),                                                        # VVIX
-        iv_rv.get("vvix_elevated", ""),                                               # VVIX_Elevated
-        iv_rv.get("overnight_rv", ""),                                                 # Overnight_RV
-        iv_rv.get("iv_overnight_rv_ratio", ""),                                        # IV_Overnight_RV_Ratio
-        iv_rv.get("blended_overnight_vol", ""),                                        # Blended_Overnight_Vol
-        iv_rv.get("student_t_breach_prob", ""),                                        # StudentT_Breach_Prob
-        iv_rv.get("student_t_nu", ""),                                                 # StudentT_Nu
-        iv_rv.get("vrp_trend", ""),                                                    # VRP_Trend
-        # ── Phase 2: Multi-bot parallel paper trial ──
-        desk_id,                                                                       # Desk_ID
-        structure_label,                                                               # Structure_Label
-        routed_tier or signal.get("signal", ""),                                       # Routed_Tier (falls back to original signal if no transform)
-        vvix_bucket,                                                                   # VVIX_Bucket
-        dow_multiplier,                                                                # DOW_Multiplier
-    ]
+    # Normalize percent fields to NUMERIC (not formatted strings)
+    trend_chg_5d = trend.get("change_5d")  # already numeric (e.g. 0.0142)
+    intraday_range = trend.get("intraday_range")  # already numeric
 
-    _core_log_signal("Sheet1", SHEET_HEADERS, row)
+    payload: Dict[str, Any] = {
+        # Identity
+        "Timestamp_ET":          timestamp,
+        "Desk_ID":               desk_id,
+        "Poke_Number":           poke_number,
+        "Day_Of_Week":           _ts_day_of_week(timestamp),
+
+        # Signal output
+        "Signal":                signal_tier,
+        "Routed_Tier":           routed_tier,
+        "Composite_Score":       composite.get("score", ""),
+        "Category":              composite.get("category", ""),
+        "Reason":                signal.get("reason", ""),
+        "Skip_Reason":           signal.get("skip_reason", ""),
+
+        # Structure & sizing
+        "Structure_Label":       structure_label,
+        "Contracts":             contracts if contracts is not None else "",
+        "VVIX_Bucket":           signal.get("vvix_bucket", ""),
+        "VVIX_Percentile":       signal.get("vvix_percentile", ""),
+        "VVIX_Bucket_Source":    signal.get("vvix_bucket_source", ""),
+        "DOW_Multiplier":        signal.get("dow_multiplier", ""),
+        "Hedge_Attached":        bool(signal.get("hedge_attached", False))
+                                 if "hedge_attached" in signal else "",
+
+        # Factor inputs
+        "IV_RV_Score":           iv_rv.get("score", ""),
+        "IV_RV_Ratio":           iv_rv.get("iv_rv_ratio", ""),
+        "Trend_Score":           trend.get("score", ""),
+        "Trend_5d_Chg_Pct":      trend_chg_5d if trend_chg_5d is not None else "",
+        "Intraday_Range_Pct":    intraday_range if intraday_range is not None else "",
+        "GPT_Score":             gpt.get("score", ""),
+        "GPT_Direction_Risk":    gpt.get("direction_risk", ""),
+        "GPT_Key_Risk":          gpt.get("key_risk", ""),
+
+        # Market context
+        "SPX_Current":           spx_current if spx_current is not None else "",
+        "VIX1D":                 iv_rv.get("implied_vol", vix1d_current) or "",
+        "VIX":                   vix_current if vix_current is not None else "",
+        "VVIX":                  iv_rv.get("vvix", ""),
+        "Realized_Vol_10d":      iv_rv.get("realized_vol", ""),
+        "Term_Structure_Ratio":  iv_rv.get("term_structure_ratio", ""),
+
+        # Diagnostics
+        "Contradiction_Flags":   contradiction_flags,
+        "Override_Applied":      override,
+        "Score_Adjustment":      score_adjustment,
+        "Passes_Agreed":         confirmation_pass.get("passes_agreed", "")
+                                 if confirmation_pass else "",
+        "Earnings_Modifier":     earnings.get("risk_modifier", "") if earnings else "",
+        "Earnings_Tickers":      _format_earnings_tickers(earnings),
+        "GPT_Reasoning":         (gpt.get("reasoning") or "")[:500],
+
+        # Operational status
+        "Webhook_Success":       bool(webhook_success),
+        "Trade_Executed":        trade_executed,
+
+        # Outcome (backfilled later by validate_outcomes.py — leave blank now)
+        "SPX_Next_Open":         "",
+        "SPX_Next_Close":        "",
+        "Overnight_Move_Pct":    "",
+        "Outcome_Correct":       "",
+
+        # Provenance
+        "Code_Version":          _get_code_version(),
+        "Environment":           _get_environment(),
+    }
+
+    print(f"[Sheets] log_signal called (desk={desk_id}, tier={routed_tier})")
+    success = _core_log_signal_dict(
+        tab_name=SHEET_TAB,
+        payload=payload,
+        expected_headers=SHEET_HEADERS,
+        desk_id=desk_id,
+    )
+    if not success:
+        # core.sheets already sent the Slack alert; we just log here for trace.
+        logger.warning("Sheet append failed for desk=%s; signal still sent to OA",
+                       desk_id)

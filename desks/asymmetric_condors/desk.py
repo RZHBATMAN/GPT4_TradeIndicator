@@ -42,6 +42,14 @@ class AsymmetricCondorsDesk(OvernightCondorsDesk):
     desk_group_label = "Desk 1 — Overnight Vol Premium Capture"
     status_label = "paper"
 
+    # Bot B matches Bot A's contract count per tier (per playbook §3.3 — only
+    # the structure tilts asymmetric, sizing is identical for clean comparison).
+    CONTRACTS_BY_TIER = {
+        'TRADE_AGGRESSIVE':   1,
+        'TRADE_NORMAL':       1,
+        'TRADE_CONSERVATIVE': 1,
+    }
+
     def get_webhook_urls(self, config: Dict) -> Dict[str, str]:
         return {
             'TRADE_AGGRESSIVE':   get_desk_config(config, self.config_prefix, 'TRADE_AGGRESSIVE_URL'),

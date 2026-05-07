@@ -12,13 +12,12 @@ from core.desk import Desk
 from core.config import get_config, get_desk_config
 from core.data.market_data import get_spx_snapshot, get_vix_with_retry
 from core.webhooks import send_webhook
-from core.sheets import log_signal as core_log_signal
 from core.alerting import record_signal_success
+from sheets_logger import log_signal as log_signal_to_sheets
 
 from desks.afternoon_butterflies.signal_engine import run_signal_analysis
 from desks.afternoon_butterflies.config import (
-    CONFIG_PREFIX, SHEET_TAB, SHEET_HEADERS,
-    WINDOW_START, WINDOW_END, WINDOW_DAYS, POKE_MINUTES,
+    CONFIG_PREFIX, WINDOW_START, WINDOW_END, WINDOW_DAYS, POKE_MINUTES,
 )
 
 ET_TZ = pytz.timezone('US/Eastern')
@@ -29,14 +28,24 @@ class AfternoonButterfliesDesk(Desk):
     display_name = "0DTE Afternoon Butterflies"
     description = "ATM iron butterflies on SPX (0DTE), VIX-level sizing. Entry ~2:00 PM, expire same day."
 
+    structure_label = "iron_butterfly_0DTE_VIX_sized"
+
     window_start = WINDOW_START
     window_end = WINDOW_END
     window_days = WINDOW_DAYS
     poke_minutes = POKE_MINUTES
 
     config_prefix = CONFIG_PREFIX
-    sheet_tab = SHEET_TAB
-    sheet_headers = SHEET_HEADERS
+
+    # Butterfly: 1 contract baseline; sizing varies by VIX-bucketed tier
+    # (this is the analog of Bot A's tier-based wing-width sizing — same
+    # contract count, different wing distance). Sized for fair comparison
+    # to overnight bots while paper-trading data accumulates.
+    CONTRACTS_BY_TIER = {
+        'TRADE_AGGRESSIVE':   1,
+        'TRADE_NORMAL':       1,
+        'TRADE_CONSERVATIVE': 1,
+    }
 
     def get_webhook_urls(self, config: Dict) -> Dict[str, str]:
         return {
@@ -106,23 +115,34 @@ class AfternoonButterfliesDesk(Desk):
             else:
                 trade_executed = "YES"
 
-        # Log to Sheets
-        row = [
-            timestamp,
-            signal['signal'],
-            signal['score'],
-            vix_value if vix_value is not None else "",
-            spx_current if spx_current is not None else "",
-            webhook.get('success', False),
-            trade_executed,
-            signal['reason'],
-            signal.get('wing_width', ''),
-            signal.get('exit_strategy', ''),
-            "",  # SPX_Expiry (backfill later)
-            "",  # Move_Pct
-            "",  # Outcome
-        ]
-        core_log_signal(SHEET_TAB, SHEET_HEADERS, row)
+        # Log to the unified "live" tab. Butterfly only computes a small subset
+        # of the schema's fields (no IV/RV factor, no trend factor, no GPT
+        # factor — just VIX-bucket-based tiering). Empty dicts for the missing
+        # factors mean those columns end up blank for butterfly rows. The
+        # name-keyed write handles this cleanly.
+        composite_payload = {
+            'score': signal.get('score', ''),
+            'category': signal.get('signal', ''),  # AGGR/NORMAL/CONSV/SKIP doubles as category
+        }
+        contracts = self.CONTRACTS_BY_TIER.get(signal.get('signal', ''))
+        log_signal_to_sheets(
+            timestamp=timestamp,
+            signal=signal,
+            composite=composite_payload,
+            iv_rv={},          # not computed for butterfly
+            trend={},          # not computed for butterfly
+            gpt={},             # not computed for butterfly
+            spx_current=spx_current,
+            vix1d_current=None, # butterfly uses VIX (30-day), not VIX1D
+            filter_stats={},
+            webhook_success=webhook.get('success', False),
+            trade_executed=trade_executed,
+            poke_number=self._daily_signal_cache.get('poke_count', 1),
+            vix_current=vix_value,
+            desk_id=self.desk_id,
+            structure_label=self.structure_label,
+            contracts=contracts,
+        )
 
         record_signal_success(desk_id=self.desk_id)
 

@@ -29,10 +29,15 @@ from desks.overnight_condors.config import SHEET_HEADERS
 logger = logging.getLogger(__name__)
 ET_TZ = pytz.timezone('US/Eastern')
 
-# ── Column indices from SHEET_HEADERS ──
-COL = {name: idx for idx, name in enumerate(SHEET_HEADERS)}
+# ── Column indices ──
+# Built lazily from the LIVE Sheet header row (not the imported SHEET_HEADERS),
+# so this script is robust to user-side schema changes (column reorders, renames,
+# additions). Populated by _connect_sheet() before any data reads.
+COL: Dict[str, int] = {}
 
-# Breakeven thresholds (must match validate_outcomes.py)
+# Breakeven thresholds (legacy single-tier table — kept for back-compat).
+# Multi-bot, structure-aware breakeven lookup lives in validate_outcomes.py
+# (BREAKEVEN_BY_STRUCTURE + breakeven_for). Prefer that for new code paths.
 MOVE_THRESHOLDS = {
     'TRADE_AGGRESSIVE': 1.00,
     'TRADE_NORMAL': 0.90,
@@ -66,29 +71,26 @@ TIER_BOUNDARIES = {
 # ============================================================================
 
 def _connect_sheet():
-    """Connect to Google Sheet. Returns worksheet or None."""
+    """Connect to the unified 'Live' tab and populate the COL name→index map
+    from the live header row. Returns worksheet or None.
+
+    Replaces the old `sh.sheet1` lookup which silently grabbed whatever the
+    first tab happened to be — bug-prone after the user added/renamed tabs.
+    """
     try:
-        import gspread
+        from core.sheets import _get_worksheet
     except ImportError:
-        print("ERROR: gspread not installed. Run: pip install gspread google-auth")
+        print("ERROR: core.sheets not importable")
         return None
-
-    config = get_config()
-    sheet_id = (config.get("GOOGLE_SHEET_ID") or "").strip()
-    json_cfg = (config.get("GOOGLE_CREDENTIALS_JSON") or "").strip()
-
-    if not sheet_id or not json_cfg:
-        print("ERROR: GOOGLE_SHEET_ID and GOOGLE_CREDENTIALS_JSON must be configured")
+    ws = _get_worksheet('live')
+    if ws is None:
+        print("ERROR: Could not connect to 'Live' tab")
         return None
-
-    try:
-        creds = json.loads(json_cfg)
-        gc = gspread.service_account_from_dict(creds)
-        sh = gc.open_by_key(sheet_id)
-        return sh.sheet1
-    except Exception as e:
-        print(f"ERROR: Could not connect to Sheet: {e}")
-        return None
+    # Build name→index from the LIVE header (whitespace-tolerant)
+    global COL
+    header = ws.row_values(1)
+    COL = {(h or '').strip(): i for i, h in enumerate(header) if (h or '').strip()}
+    return ws
 
 
 def _safe_float(val, default=None):
@@ -112,14 +114,26 @@ def _safe_int(val, default=None):
 
 
 def _get_col(row, col_name, default=''):
-    idx = COL.get(col_name)
+    # Whitespace-tolerant lookup against the live-Sheet-built COL map
+    idx = COL.get((col_name or '').strip())
     if idx is None or idx >= len(row):
         return default
     return row[idx]
 
 
-def load_signal_data() -> List[Dict[str, Any]]:
-    """Load all signal rows from Google Sheets into structured dicts."""
+def load_signal_data(desk_filter: str = 'overnight_condors') -> List[Dict[str, Any]]:
+    """Load signal rows from the 'Live' tab into structured dicts.
+
+    Args:
+        desk_filter: Desk_ID to filter on. Defaults to 'overnight_condors' (Bot A
+            + legacy rows). Pass another desk_id to analyze a specific Phase 2
+            bot, or '' to load all desks (mixed-bot summary).
+
+    Multi-bot rows from butterfly are skipped here — their outcome semantics
+    differ (intraday) and need a separate analysis path. Bot D/F rows whose
+    Signal column contains routed tiers (e.g. TRADE_VVIX_HIGH) are kept and
+    routed through the breakeven lookup in validate_outcomes.
+    """
     ws = _connect_sheet()
     if ws is None:
         return []
@@ -129,16 +143,31 @@ def load_signal_data() -> List[Dict[str, Any]]:
         print("No data rows found in sheet")
         return []
 
+    # Build dynamic header length from live header (don't trust SHEET_HEADERS,
+    # the user may have added/removed columns).
+    header_len = len(all_rows[0])
+
     signals = []
+    skipped_other_desk = 0
+    skipped_butterfly = 0
     for row in all_rows[1:]:
-        while len(row) < len(SHEET_HEADERS):
+        while len(row) < header_len:
             row.append('')
 
+        # Multi-bot filter: skip butterfly always (different outcome semantics)
+        # and skip other desks unless desk_filter is empty
+        desk_id = _get_col(row, 'Desk_ID') or 'overnight_condors'  # legacy → Bot A
+        if desk_id == 'afternoon_butterflies':
+            skipped_butterfly += 1
+            continue
+        if desk_filter and desk_id != desk_filter:
+            skipped_other_desk += 1
+            continue
+
         signal_tier = _get_col(row, 'Signal')
-        # Filter out invalid/incomplete rows
-        if not signal_tier or signal_tier not in (
-            'TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE', 'SKIP'
-        ):
+        # Accept any TRADE_* or SKIP. This now covers Bot D's TRADE_VVIX_*
+        # and Bot E/F's compound tier names too.
+        if not signal_tier or not (signal_tier.startswith('TRADE_') or signal_tier == 'SKIP'):
             continue
         if not _get_col(row, 'Composite_Score') or not _get_col(row, 'Timestamp_ET'):
             continue
@@ -200,8 +229,25 @@ def load_signal_data() -> List[Dict[str, Any]]:
             'student_t_breach_prob': _safe_float(_get_col(row, 'StudentT_Breach_Prob')),
             'student_t_nu': _safe_float(_get_col(row, 'StudentT_Nu')),
             'vrp_trend': _get_col(row, 'VRP_Trend'),
+            # Multi-bot context (read from new schema columns)
+            'desk_id': desk_id,
+            'routed_tier': _get_col(row, 'Routed_Tier') or signal_tier,
+            'structure_label': _get_col(row, 'Structure_Label'),
+            'vvix_bucket': _get_col(row, 'VVIX_Bucket'),
+            'dow_multiplier': _get_col(row, 'DOW_Multiplier'),
+            'contracts': _safe_int(_get_col(row, 'Contracts')),
         }
         signals.append(entry)
+
+    if skipped_butterfly or skipped_other_desk:
+        filter_label = desk_filter or '(all desks)'
+        print(f"  [load_signal_data] desk_filter={filter_label!r} → loaded {len(signals)} rows")
+        if skipped_butterfly:
+            print(f"  [load_signal_data] Skipped {skipped_butterfly} butterfly row(s) "
+                  f"(intraday outcome semantics — not handled by this script)")
+        if skipped_other_desk:
+            print(f"  [load_signal_data] Skipped {skipped_other_desk} row(s) from other desks "
+                  f"(use --desk to analyze a specific bot, or '' for all)")
 
     return signals
 
@@ -1816,10 +1862,17 @@ def _sections_to_text(sections: List[Dict[str, Any]]) -> str:
 # MAIN
 # ============================================================================
 
-def run_analysis(min_rows: int = 0) -> List[Dict[str, Any]]:
-    """Run the full analysis and return list of section dicts."""
-    print("Loading signal data from Google Sheets...")
-    signals = load_signal_data()
+def run_analysis(min_rows: int = 0, desk_filter: str = 'overnight_condors') -> List[Dict[str, Any]]:
+    """Run the full analysis and return list of section dicts.
+
+    Args:
+        min_rows: minimum outcome-rows required to produce a report
+        desk_filter: Desk_ID to analyze. Defaults to 'overnight_condors' (Bot A).
+            Pass another desk_id to analyze a specific Phase 2 bot.
+            Pass '' to load all desks (mixed-bot summary, less informative).
+    """
+    print(f"Loading signal data from Google Sheets (desk_filter={desk_filter or 'all'})...")
+    signals = load_signal_data(desk_filter=desk_filter)
 
     if not signals:
         print("No signal data found. Check your Google Sheets configuration.")
@@ -1893,6 +1946,7 @@ if __name__ == '__main__':
 
     min_rows = 0
     export_file = None
+    desk_filter = 'overnight_condors'  # default: Bot A (the original desk)
 
     i = 0
     while i < len(args):
@@ -1902,15 +1956,20 @@ if __name__ == '__main__':
         elif args[i] == '--export' and i + 1 < len(args):
             export_file = args[i + 1]
             i += 2
+        elif args[i] == '--desk' and i + 1 < len(args):
+            # Target a specific desk for analysis. Use '' (empty) to load all.
+            desk_filter = args[i + 1] if args[i + 1] != 'all' else ''
+            i += 2
         elif args[i] == '--help':
             print(__doc__)
             sys.exit(0)
         else:
             print(f"Unknown argument: {args[i]}")
-            print("Usage: python analyze_signals.py [--min-rows N] [--export FILE]")
+            print("Usage: python analyze_signals.py [--min-rows N] [--export FILE] "
+                  "[--desk <desk_id|all>]")
             sys.exit(1)
 
-    sections = run_analysis(min_rows=min_rows)
+    sections = run_analysis(min_rows=min_rows, desk_filter=desk_filter)
 
     if not sections:
         sys.exit(1)
@@ -1927,7 +1986,7 @@ if __name__ == '__main__':
 
     # Auto-save as styled HTML report
     try:
-        from report_writer import save_html_report
+        from core.report_writer import save_html_report
         path = save_html_report(sections, prefix='analysis')
         print(f"\n  Report saved: {path}")
         print(f"  View in browser: open {path}")

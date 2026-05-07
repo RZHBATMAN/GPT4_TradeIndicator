@@ -62,8 +62,7 @@ from core.config import get_config
 logger = logging.getLogger(__name__)
 ET_TZ = pytz.timezone('US/Eastern')
 
-# Iron condor parameters by signal tier
-# Width = spread width in SPX points, delta = short strike delta
+# Iron condor parameters by signal tier (Bot A canonical structure for reference)
 TRADE_PARAMS = {
     'TRADE_AGGRESSIVE': {'width': 20, 'delta': 0.18},
     'TRADE_NORMAL':     {'width': 25, 'delta': 0.16},
@@ -82,29 +81,136 @@ OA_EXIT_PARAMS = {
 }
 OA_TIME_EXIT = '10:00'       # ET — hard close for all tiers
 
-# Breakeven thresholds derived from delta:
-# Short strike distance ≈ delta * daily_vol * SPX_price (simplified)
-# For a practical proxy, we use:
-#   Approximate short-strike distance (%) = delta * 5.0
-#   (5.0 is roughly sqrt(1/252) * VIX_avg, mapping delta to % move)
-# This gives thresholds:
-#   AGGRESSIVE:   0.18 * 5.0 = 0.90%
-#   NORMAL:       0.16 * 5.0 = 0.80%
-#   CONSERVATIVE: 0.14 * 5.0 = 0.70%
-# The condor also collects premium, which extends the breakeven by ~0.10-0.15%.
-# Net approximate breakevens:
-MOVE_THRESHOLDS = {
-    'TRADE_AGGRESSIVE': 1.00,     # 0.18 delta → ~1.00% breakeven
-    'TRADE_NORMAL': 0.90,         # 0.16 delta → ~0.90% breakeven
-    'TRADE_CONSERVATIVE': 0.80,   # 0.14 delta → ~0.80% breakeven
-    'SKIP': 0.80,                 # SKIP is "correct" if move >= conservative breakeven
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-bot breakeven lookup
+# Each desk's structure_label maps to a {routed_tier → breakeven_pct} table.
+# Used by _evaluate_outcome to determine whether the overnight move breached
+# the SHORT strike for THIS bot's structural recipe.
+#
+# Breakeven formula (simplified): short_strike_distance_pct ≈ delta * 5.0
+#   AGGR Δ0.18 → 0.90%, NORMAL Δ0.16 → 0.80%, CONSV Δ0.14 → 0.70%
+#   + ~0.10% credit cushion → net 1.00 / 0.90 / 0.80
+# For asymmetric IC: the *narrower* (call) side is the binding constraint.
+# ─────────────────────────────────────────────────────────────────────────────
+BREAKEVEN_BY_STRUCTURE: Dict[str, Dict[str, float]] = {
+    # Bot A — symmetric IC
+    'IC_25pt_0.16d_symmetric': {
+        'TRADE_AGGRESSIVE':   1.00,
+        'TRADE_NORMAL':       0.90,
+        'TRADE_CONSERVATIVE': 0.80,
+    },
+    # Bot B — asymmetric IC; call-side is binding (narrower)
+    'asymmetric_IC_putΔ20_callΔ10': {
+        'TRADE_AGGRESSIVE':   0.85,   # short call Δ0.14 → ~0.85%
+        'TRADE_NORMAL':       0.75,   # short call Δ0.12 → ~0.75%
+        'TRADE_CONSERVATIVE': 0.65,   # short call Δ0.10 → ~0.65%
+    },
+    # Bot C — put-spread only (one-sided; see STRUCTURE_DIRECTION)
+    'putspread_putΔ16_2x_size': {
+        'TRADE_AGGRESSIVE':   1.00,
+        'TRADE_NORMAL':       0.90,
+        'TRADE_CONSERVATIVE': 0.80,
+    },
+    # Bot D — VVIX-conditional sizing on Bot A NORMAL structure (all tiers same)
+    'IC_25pt_0.16d_VVIXpct252d': {
+        'TRADE_VVIX_LOW':     0.90,
+        'TRADE_VVIX_NORMAL':  0.90,
+        'TRADE_VVIX_HIGH':    0.90,
+        'TRADE_VVIX_EXTREME': 0.90,
+    },
+    # Bot E — DOW-conditional sizing on Bot A's per-tier structure
+    'IC_25pt_0.16d_DOWsized': {
+        'TRADE_AGGRESSIVE_BOOST':    1.00, 'TRADE_AGGRESSIVE_NORMAL':    1.00,
+        'TRADE_NORMAL_BOOST':        0.90, 'TRADE_NORMAL_NORMAL':        0.90,
+        'TRADE_CONSERVATIVE_BOOST':  0.80, 'TRADE_CONSERVATIVE_NORMAL':  0.80,
+    },
+    # Bot F — combined; asymmetric IC + VVIX × DOW (call-side breakeven binding)
+    'asymIC_VVIXpct252d_DOWmult_EXTRhedge': {
+        'TRADE_LOW_NORMAL':              0.75, 'TRADE_LOW_BOOST':              0.75,
+        'TRADE_NORMAL_NORMAL':           0.75, 'TRADE_NORMAL_BOOST':           0.75,
+        'TRADE_HIGH_NORMAL':             0.75, 'TRADE_HIGH_BOOST':             0.75,
+        'TRADE_EXTREME_NORMAL_HEDGED':   0.75, 'TRADE_EXTREME_BOOST_HEDGED':   0.75,
+    },
 }
+
+# Symmetric structures fail on either-side moves; one-sided fail only on adverse direction.
+STRUCTURE_DIRECTION: Dict[str, str] = {
+    'IC_25pt_0.16d_symmetric':              'symmetric',
+    'asymmetric_IC_putΔ20_callΔ10':         'symmetric',
+    'putspread_putΔ16_2x_size':             'down_only',     # ONLY down moves can fail
+    'IC_25pt_0.16d_VVIXpct252d':            'symmetric',
+    'IC_25pt_0.16d_DOWsized':               'symmetric',
+    'asymIC_VVIXpct252d_DOWmult_EXTRhedge': 'symmetric',
+    # Butterfly: 0DTE — different outcome metric (intraday); see SKIPPED_DESK_IDS
+    'iron_butterfly_0DTE_VIX_sized':        'symmetric',
+}
+
+# Desks whose outcome semantics are NOT next-day overnight close-to-open.
+# For now we skip these in validate_outcomes.py (TODO: dedicated intraday handler).
+SKIPPED_DESK_IDS = {'afternoon_butterflies'}
+
+
+def breakeven_for(structure_label: str, routed_tier: str, signal_tier: str = '') -> Optional[float]:
+    """Return breakeven % for this bot's structure + routed tier.
+
+    Lookup order:
+      1. (structure_label, routed_tier) — exact multi-bot match
+      2. (structure_label, signal_tier) — legacy rows where Routed_Tier is blank
+      3. ('IC_25pt_0.16d_symmetric', signal_tier) — pre-multibot Bot A default
+         (handles historical rows AND back-compat callers that omit structure_label)
+
+    Returns None only when even the Bot A fallback can't classify the tier.
+    """
+    by_tier = BREAKEVEN_BY_STRUCTURE.get(structure_label or '')
+    if by_tier is not None:
+        v = by_tier.get(routed_tier) or by_tier.get(signal_tier)
+        if v is not None:
+            return v
+
+    # Legacy fallback — Bot A canonical IC (historical default)
+    bot_a = BREAKEVEN_BY_STRUCTURE['IC_25pt_0.16d_symmetric']
+    return bot_a.get(routed_tier) or bot_a.get(signal_tier)
+
 
 # Threshold for "was not trading correct?" — if move >= this, not trading was right
 NO_TRADE_THRESHOLD = 0.80
 
-# Column indices (0-based) matching SHEET_HEADERS in sheets_logger.py
-# Note: GPT_Tokens (col 23) and GPT_Cost (col 24) were added after GPT_Reasoning (col 22)
+# ── Legacy back-compat alias — Bot A's symmetric IC breakevens.
+# New code should use BREAKEVEN_BY_STRUCTURE / breakeven_for() instead, which
+# handles all desks. This alias is kept so old callers (tests, scripts that
+# read from analyze_signals) continue to work without immediate refactoring.
+MOVE_THRESHOLDS = dict(BREAKEVEN_BY_STRUCTURE['IC_25pt_0.16d_symmetric'])
+MOVE_THRESHOLDS['SKIP'] = NO_TRADE_THRESHOLD
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Header-index lookup (name-keyed reads)
+# Populated by _build_header_index(ws); used by _col(row, name).
+# Robust to column reordering and minor whitespace typos in the Sheet header.
+# ─────────────────────────────────────────────────────────────────────────────
+HEADER_INDEX: Dict[str, int] = {}
+
+
+def _build_header_index(ws) -> None:
+    """Read the live header row from the worksheet and populate HEADER_INDEX."""
+    global HEADER_INDEX
+    header = ws.row_values(1)
+    HEADER_INDEX = {(h or '').strip(): i
+                    for i, h in enumerate(header) if (h or '').strip()}
+
+
+def _col(row: List[str], name: str, default: str = '') -> str:
+    """Get value from a Sheet row by header name. Returns default if missing."""
+    idx = HEADER_INDEX.get(name)
+    if idx is None or idx >= len(row):
+        return default
+    return row[idx] or default
+
+
+# ── Legacy COL_* constants kept for back-compat with tests + external callers ──
+# Defaults match the original SHEET_HEADERS layout. After _connect_sheet() runs,
+# _refresh_legacy_col_indices() updates these to match the LIVE header positions.
+# New code should prefer _col(row, name) instead of these positional indices.
 COL_TIMESTAMP = 0
 COL_POKE_NUMBER = 1
 COL_SIGNAL = 2
@@ -118,6 +224,28 @@ COL_SPX_NEXT_OPEN = 28
 COL_SPX_NEXT_CLOSE = 29
 COL_OVERNIGHT_MOVE = 30
 COL_OUTCOME_CORRECT = 31
+
+
+def _refresh_legacy_col_indices() -> None:
+    """Update the module-level COL_* constants from HEADER_INDEX after the sheet
+    is loaded. Lets old code paths keep working while the migration to _col()
+    is in progress."""
+    global COL_TIMESTAMP, COL_POKE_NUMBER, COL_SIGNAL, COL_SPX_CURRENT, COL_VIX
+    global COL_TRADE_EXECUTED, COL_CONTRADICTION_FLAGS, COL_OVERRIDE, COL_SCORE_ADJ
+    global COL_SPX_NEXT_OPEN, COL_SPX_NEXT_CLOSE, COL_OVERNIGHT_MOVE, COL_OUTCOME_CORRECT
+    COL_TIMESTAMP           = HEADER_INDEX.get('Timestamp_ET', 0)
+    COL_POKE_NUMBER         = HEADER_INDEX.get('Poke_Number', 0)
+    COL_SIGNAL              = HEADER_INDEX.get('Signal', 0)
+    COL_SPX_CURRENT         = HEADER_INDEX.get('SPX_Current', 0)
+    COL_VIX                 = HEADER_INDEX.get('VIX', 0)
+    COL_TRADE_EXECUTED      = HEADER_INDEX.get('Trade_Executed', 0)
+    COL_CONTRADICTION_FLAGS = HEADER_INDEX.get('Contradiction_Flags', 0)
+    COL_OVERRIDE            = HEADER_INDEX.get('Override_Applied', 0)
+    COL_SCORE_ADJ           = HEADER_INDEX.get('Score_Adjustment', 0)
+    COL_SPX_NEXT_OPEN       = HEADER_INDEX.get('SPX_Next_Open', 0)
+    COL_SPX_NEXT_CLOSE      = HEADER_INDEX.get('SPX_Next_Close', 0)
+    COL_OVERNIGHT_MOVE      = HEADER_INDEX.get('Overnight_Move_Pct', 0)
+    COL_OUTCOME_CORRECT     = HEADER_INDEX.get('Outcome_Correct', 0)
 
 
 def _parse_signal_date(date_str: str) -> Optional[datetime]:
@@ -270,6 +398,8 @@ def _evaluate_outcome(
     spx_entry: float,
     spx_exit_price: float,
     spx_next_close: float,
+    structure_label: str = '',
+    routed_tier: str = '',
 ) -> Tuple[float, str]:
     """Calculate overnight move and determine if the outcome was correct.
 
@@ -278,21 +408,37 @@ def _evaluate_outcome(
     unmanaged overnight exposure window from ~2 PM entry to 10 AM exit.
 
     Uses Trade_Executed to decide:
-      - YES → check against tier-specific breakeven threshold
+      - YES → check against structure-specific breakeven threshold
       - NO_* → check against NO_TRADE_THRESHOLD (was staying out correct?)
+
+    For multi-bot trial: looks up the breakeven by `structure_label` +
+    `routed_tier`, falling back to `signal` (legacy rows). Honors one-sided
+    structures (Bot C put-spread): only fails on adverse-direction moves.
 
     Returns (overnight_move_pct, outcome_str).
     """
-    # Overnight move = entry price to exit price (10 AM ET or daily open)
-    overnight_move_pct = abs((spx_exit_price - spx_entry) / spx_entry) * 100
+    # Signed and absolute overnight moves
+    signed_move_pct = (spx_exit_price - spx_entry) / spx_entry * 100
+    overnight_move_pct = abs(signed_move_pct)
 
     actually_traded = trade_executed == 'YES'
 
     if actually_traded:
-        # We were in the trade — was the condor safe?
-        threshold = MOVE_THRESHOLDS.get(signal, 0.80)
-        correct = overnight_move_pct < threshold
-        outcome = "CORRECT_TRADE" if correct else "WRONG_TRADE"
+        # Look up structure-specific breakeven; fall back to legacy MOVE_THRESHOLDS
+        # (which is now Bot A's symmetric IC by structure_label='').
+        threshold = breakeven_for(structure_label, routed_tier, signal_tier=signal)
+        if threshold is None:
+            # Unknown structure or tier — don't classify, mark for inspection
+            return round(overnight_move_pct, 4), "UNKNOWN_STRUCTURE"
+
+        # Honor one-sided structures (Bot C put-spread fails only on down moves)
+        direction = STRUCTURE_DIRECTION.get(structure_label, 'symmetric')
+        if direction == 'down_only':
+            breached = (signed_move_pct < 0) and (overnight_move_pct >= threshold)
+        else:
+            breached = overnight_move_pct >= threshold
+
+        outcome = "CORRECT_TRADE" if not breached else "WRONG_TRADE"
     else:
         # We did NOT trade — was that the right call?
         correct = overnight_move_pct >= NO_TRADE_THRESHOLD
@@ -315,29 +461,25 @@ def _evaluate_outcome(
 
 
 def _connect_sheet():
-    """Connect to Google Sheet. Returns worksheet or None."""
+    """Connect to the unified 'Live' tab of the Google Sheet via the firm's
+    name-tolerant lookup helper. Returns worksheet or None.
+
+    Once connected, populate HEADER_INDEX so name-keyed reads work for the rest
+    of the script. This replaces the old `sh.sheet1` lookup which silently
+    targeted whatever the first tab happened to be.
+    """
     try:
-        import gspread
+        from core.sheets import _get_worksheet
     except ImportError:
-        print("ERROR: gspread not installed. Run: pip install gspread google-auth")
+        print("ERROR: core.sheets not importable")
         return None
-
-    config = get_config()
-    sheet_id = (config.get("GOOGLE_SHEET_ID") or "").strip()
-    json_cfg = (config.get("GOOGLE_CREDENTIALS_JSON") or "").strip()
-
-    if not sheet_id or not json_cfg:
-        print("ERROR: GOOGLE_SHEET_ID and GOOGLE_CREDENTIALS_JSON must be configured")
+    ws = _get_worksheet('live')
+    if ws is None:
+        print("ERROR: Could not connect to 'Live' tab")
         return None
-
-    try:
-        creds = json.loads(json_cfg)
-        gc = gspread.service_account_from_dict(creds)
-        sh = gc.open_by_key(sheet_id)
-        return sh.sheet1
-    except Exception as e:
-        print(f"ERROR: Could not connect to Sheet: {e}")
-        return None
+    _build_header_index(ws)
+    _refresh_legacy_col_indices()
+    return ws
 
 
 def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
@@ -364,20 +506,33 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
 
     print(f"\nScanning {len(all_rows) - 1} signal rows for missing outcomes...\n")
 
+    skipped_butterfly = 0
+    skipped_unknown_structure = 0
+
     for row_idx in range(1, len(all_rows)):
         row = all_rows[row_idx]
 
         # Pad row if needed (sheet may have fewer columns than expected)
-        while len(row) <= COL_OUTCOME_CORRECT:
+        while len(row) < len(header):
             row.append("")
 
-        timestamp = row[COL_TIMESTAMP]
-        signal = row[COL_SIGNAL]
-        spx_current_str = row[COL_SPX_CURRENT]
-        trade_executed_raw = row[COL_TRADE_EXECUTED]
+        # Read by header NAME — robust to column reorders / typos.
+        timestamp           = _col(row, 'Timestamp_ET')
+        signal              = _col(row, 'Signal')
+        routed_tier         = _col(row, 'Routed_Tier') or signal  # fallback for legacy rows
+        structure_label     = _col(row, 'Structure_Label')
+        desk_id             = _col(row, 'Desk_ID') or 'overnight_condors'  # legacy → Bot A
+        spx_current_str     = _col(row, 'SPX_Current')
+        trade_executed_raw  = _col(row, 'Trade_Executed')
 
-        # Skip if outcome already filled
-        if row[COL_SPX_NEXT_OPEN] and row[COL_OUTCOME_CORRECT]:
+        # Skip if outcome already filled (use name lookup)
+        if _col(row, 'SPX_Next_Open') and _col(row, 'Outcome_Correct'):
+            continue
+
+        # Multi-bot partitioning: skip desks whose outcome semantics aren't
+        # next-day overnight close-to-open (e.g., 0DTE butterfly is intraday).
+        if desk_id in SKIPPED_DESK_IDS:
+            skipped_butterfly += 1
             continue
 
         # Skip if missing critical data
@@ -429,8 +584,13 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
             exit_source = "open"
 
         overnight_move_pct, outcome = _evaluate_outcome(
-            signal, trade_executed, spx_entry, spx_exit_price, spx_next_close
+            signal, trade_executed, spx_entry, spx_exit_price, spx_next_close,
+            structure_label=structure_label, routed_tier=routed_tier,
         )
+
+        # Track unknown-structure rows so the summary can flag them
+        if outcome == 'UNKNOWN_STRUCTURE':
+            skipped_unknown_structure += 1
 
         result = {
             'row': row_idx + 1,
@@ -466,6 +626,12 @@ def backfill_outcomes(dry_run: bool = False) -> List[Dict]:
             print(f"\nERROR batch-writing cells: {e}")
 
     print(f"\n{'DRY RUN — ' if dry_run else ''}Processed {len(results)} rows, updated {updates_made}")
+    if skipped_butterfly:
+        print(f"  Skipped {skipped_butterfly} butterfly row(s) "
+              f"(intraday outcome semantics — TODO: dedicated handler)")
+    if skipped_unknown_structure:
+        print(f"  ⚠ {skipped_unknown_structure} row(s) had UNKNOWN_STRUCTURE — "
+              f"check Structure_Label / Routed_Tier columns")
     return results
 
 
@@ -490,15 +656,16 @@ def print_backfill_summary() -> Optional[str]:
     not_traded = 0
 
     for row in all_rows[1:]:
-        while len(row) <= COL_OUTCOME_CORRECT:
+        # Pad row to header length (sheet may have fewer cells than header)
+        while len(row) < len(all_rows[0]):
             row.append("")
 
-        signal = row[COL_SIGNAL]
+        signal = _col(row, 'Signal')
         if not signal:
             continue
 
-        trade_executed = row[COL_TRADE_EXECUTED]
-        outcome = row[COL_OUTCOME_CORRECT]
+        trade_executed = _col(row, 'Trade_Executed')
+        outcome = _col(row, 'Outcome_Correct')
 
         if outcome:
             with_outcomes += 1
@@ -506,7 +673,7 @@ def print_backfill_summary() -> Optional[str]:
                 traded += 1
             elif trade_executed and trade_executed != 'NO_DUPLICATE':
                 not_traded += 1
-        elif signal and row[COL_SPX_CURRENT]:
+        elif signal and _col(row, 'SPX_Current'):
             awaiting += 1
 
     lines = []
@@ -543,7 +710,7 @@ if __name__ == '__main__':
     # Auto-save as HTML
     if summary:
         try:
-            from report_writer import save_html_report
+            from core.report_writer import save_html_report
             path = save_html_report(summary, prefix='validate')
             print(f"\n  Report saved: {path}")
         except Exception as e:

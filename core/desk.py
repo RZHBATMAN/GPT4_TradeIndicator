@@ -26,6 +26,12 @@ class Desk:
     # ('live', 'paper', 'oa-native'). Defaults to 'paper' for safety.
     status_label: str = "paper"
 
+    # Mapping of routed_tier label → contract count. Each desk subclass overrides
+    # with its own tier-to-sizing schedule (see things_i_need_to_do.md per-bot
+    # tables). Used by the Sheet logger to populate the `Contracts` column.
+    # Default empty dict → contracts column blank.
+    CONTRACTS_BY_TIER: Dict[str, int] = {}
+
     # Trading window
     window_start: dt_time = dt_time(13, 30)
     window_end: dt_time = dt_time(14, 30)

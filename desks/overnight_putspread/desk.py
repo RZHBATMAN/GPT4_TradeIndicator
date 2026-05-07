@@ -43,6 +43,14 @@ class OvernightPutspreadDesk(OvernightCondorsDesk):
     desk_group_label = "Desk 1 — Overnight Vol Premium Capture"
     status_label = "paper"
 
+    # Bot C: 2× Bot A contracts (per playbook §4.3 — put-spread uses ~half the
+    # margin per contract, doubling normalises gross margin commitment).
+    CONTRACTS_BY_TIER = {
+        'TRADE_AGGRESSIVE':   2,
+        'TRADE_NORMAL':       2,
+        'TRADE_CONSERVATIVE': 2,
+    }
+
     def get_webhook_urls(self, config: Dict) -> Dict[str, str]:
         return {
             'TRADE_AGGRESSIVE':   get_desk_config(config, self.config_prefix, 'TRADE_AGGRESSIVE_URL'),

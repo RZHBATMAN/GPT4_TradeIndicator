@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SPX Signal Report - 2026-05-07 02:03 AM ET</title>
+    <style>
+:root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --muted: #8b949e;
+    --border: #30363d;
+    --surface: #161b22;
+    --surface2: #1c2128;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 24px 32px;
+}
+.container { max-width: 1100px; margin: 0 auto; }
+
+/* ── Header ── */
+.report-header {
+    text-align: center;
+    padding: 24px 0 16px;
+    margin-bottom: 24px;
+    border-bottom: 2px solid var(--accent);
+}
+.report-header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4px;
+}
+.report-header .subtitle {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+/* ── Table of Contents ── */
+.toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+}
+.toc h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+.toc a {
+    color: var(--accent);
+    text-decoration: none;
+    display: block;
+    padding: 3px 0;
+    font-size: 14px;
+}
+.toc a:hover { text-decoration: underline; }
+
+/* ── Sections ── */
+.report-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+}
+.section-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* ── KPI Grid ── */
+.kpi-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.kpi {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 18px;
+    min-width: 160px;
+    flex: 1;
+}
+.kpi .value {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+.kpi .label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+}
+.kpi.positive .value { color: var(--green); }
+.kpi.negative .value { color: var(--red); }
+.kpi.warning .value { color: var(--yellow); }
+.kpi.neutral .value { color: var(--fg); }
+
+/* ── Tables ── */
+.table-wrapper { overflow-x: auto; margin-bottom: 16px; }
+.table-caption {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 8px;
+}
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+.data-table th {
+    text-align: left;
+    color: var(--accent);
+    font-weight: 600;
+    padding: 8px 12px;
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+.data-table td {
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.data-table tbody tr:hover { background: var(--surface2); }
+.data-table .num { text-align: right; }
+td.positive { color: var(--green); }
+td.negative { color: var(--red); }
+td.warning { color: var(--yellow); }
+td.muted { color: var(--muted); }
+
+/* ── Detail Items ── */
+.detail-list { margin-bottom: 16px; }
+.detail-item {
+    padding: 8px 12px;
+    border-left: 3px solid var(--border);
+    margin-bottom: 6px;
+    font-family: 'SF Mono', 'Cascadia Code', monospace;
+    font-size: 13px;
+    background: var(--surface2);
+    border-radius: 0 4px 4px 0;
+}
+.detail-item.negative { border-left-color: var(--red); color: var(--red); }
+.detail-item.positive { border-left-color: var(--green); color: var(--green); }
+.detail-item.warning { border-left-color: var(--yellow); color: var(--yellow); }
+
+/* ── Callouts ── */
+.callout {
+    padding: 12px 16px;
+    border-left: 4px solid var(--accent);
+    background: var(--surface2);
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 12px;
+    font-size: 13px;
+}
+.callout.positive { border-left-color: var(--green); }
+.callout.negative { border-left-color: var(--red); }
+.callout.warning { border-left-color: var(--yellow); }
+.callout.info { border-left-color: var(--accent); }
+
+/* ── Sub-sections ── */
+.subsection {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+.subsection-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 10px;
+}
+
+/* ── Tags ── */
+.tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Cascadia Code', monospace;
+}
+
+/* ── Text blocks ── */
+.text-block {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 12px;
+    line-height: 1.7;
+}
+
+/* ── Footer ── */
+.report-footer {
+    text-align: center;
+    padding-top: 16px;
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 11px;
+    border-top: 1px solid var(--border);
+}
+
+/* ── Print ── */
+@media print {
+    body { background: white; color: #1a1a1a; font-size: 12px; padding: 12px; }
+    .report-section { background: #f9f9f9; border-color: #ddd; }
+    .kpi { background: #f0f0f0; border-color: #ddd; }
+    .section-title, .toc a, .report-header h1, .data-table th { color: #1a5fb4; }
+    .kpi.positive .value { color: #2a7e19; }
+    .kpi.negative .value { color: #c01c28; }
+    .kpi.warning .value { color: #a67c00; }
+    td.positive { color: #2a7e19; }
+    td.negative { color: #c01c28; }
+}
+
+/* ── Legacy <pre> mode ── */
+pre.legacy {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    padding: 16px;
+    background: var(--surface);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+}
+</style>
+</head>
+<body>
+    <div class="container">
+        <div class="report-header">
+            <h1>SPX Signal Report</h1>
+            <div class="subtitle">2026-05-07 02:03:24 AM ET | validate_2026-05-07_02-03.html</div>
+        </div>
+        <pre class="legacy">
+==================================================
+  BACKFILL SUMMARY
+==================================================
+  Total rows:           200
+  With outcomes:        181
+    Traded (YES):       18
+    Not traded:         59
+  Awaiting backfill:    19
+
+  For detailed analysis, run:
+    python analyze_signals.py
+==================================================</pre>
+        <div class="report-footer">
+            Ren's SPX Overnight Vol Premium Signal Engine
+        </div>
+    </div>
+</body>
+</html>

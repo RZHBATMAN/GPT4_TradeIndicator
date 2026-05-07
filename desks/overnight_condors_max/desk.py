@@ -99,6 +99,19 @@ class OvernightCondorsMaxDesk(OvernightCondorsDesk):
     desk_group_label = "Desk 1 — Overnight Vol Premium Capture"
     status_label = "paper"
 
+    # Bot F: combined VVIX × DOW sizing matrix (per playbook §7.3).
+    # EXTREME variants are always _HEDGED (mandatory tail hedge).
+    CONTRACTS_BY_TIER = {
+        'TRADE_LOW_NORMAL':              1,
+        'TRADE_LOW_BOOST':               2,
+        'TRADE_NORMAL_NORMAL':           2,
+        'TRADE_NORMAL_BOOST':            3,
+        'TRADE_HIGH_NORMAL':             3,
+        'TRADE_HIGH_BOOST':              4,
+        'TRADE_EXTREME_NORMAL_HEDGED':   4,
+        'TRADE_EXTREME_BOOST_HEDGED':    6,
+    }
+
     def get_webhook_urls(self, config: Dict) -> Dict[str, str]:
         """9 webhook URLs: 8 trade variants + 1 no-trade.
 

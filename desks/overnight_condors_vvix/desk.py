@@ -62,6 +62,15 @@ class OvernightCondorsVvixDesk(OvernightCondorsDesk):
     desk_group_label = "Desk 1 — Overnight Vol Premium Capture"
     status_label = "paper"
 
+    # Bot D: VVIX-quartile-aligned contract sizing (per playbook §5.3).
+    # Baseline NORMAL = 2 contracts so multipliers are integers.
+    CONTRACTS_BY_TIER = {
+        'TRADE_VVIX_LOW':     1,
+        'TRADE_VVIX_NORMAL':  2,
+        'TRADE_VVIX_HIGH':    3,
+        'TRADE_VVIX_EXTREME': 4,
+    }
+
     def get_webhook_urls(self, config: Dict) -> Dict[str, str]:
         """Five webhook URLs — one per VVIX bucket plus NO_TRADE for SKIP."""
         return {

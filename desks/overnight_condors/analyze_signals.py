@@ -316,12 +316,47 @@ def _pct(n: int, total: int) -> str:
     return f"{n / total * 100:.1f}%"
 
 
-def _pnl_for_trade(signal: str, correct: bool) -> float:
-    """Compute P&L proxy for a single trade."""
-    params = PNL_PER_LOT.get(signal)
+def _base_tier_for_pnl(tier: str) -> str:
+    """Map any tier label (Phase 2 included) to the canonical Bot A tier
+    that has a PNL_PER_LOT entry.
+
+    Phase 2 tier strings can be:
+      - TRADE_AGGRESSIVE / TRADE_NORMAL / TRADE_CONSERVATIVE  (Bot A/B/C)
+      - TRADE_AGGRESSIVE_BOOST / TRADE_NORMAL_NORMAL / ...     (Bot E)
+      - TRADE_VVIX_LOW / NORMAL / HIGH / EXTREME              (Bot D)
+      - TRADE_LOW_BOOST / TRADE_HIGH_NORMAL / ...             (Bot F)
+      - TRADE_EXTREME_BOOST_HEDGED                            (Bot F)
+
+    Strategy: prefer an exact match; otherwise fall back to TRADE_NORMAL
+    (Bot A's NORMAL is the structural baseline for Bots D and F's IC, and
+    is a reasonable proxy for credit/max-loss profile across Bot E variants).
+    Bot B/C use Bot A's per-tier credit/max-loss almost identically, so
+    Phase 2 tiers that prefix-match an A tier use that tier's params.
+    """
+    if tier in PNL_PER_LOT:
+        return tier
+    for base in ('TRADE_AGGRESSIVE', 'TRADE_NORMAL', 'TRADE_CONSERVATIVE'):
+        if tier.startswith(base):
+            return base
+    return 'TRADE_NORMAL'
+
+
+def _pnl_for_trade(signal_tier: str, correct: bool, contracts: int = 1) -> float:
+    """Compute P&L proxy for a single trade, scaled by contract count.
+
+    Note: this is a STRUCTURAL proxy (credit & max-loss from Bot A's tier
+    table), not actual realised P&L from OA. It assumes the trade either
+    hits profit target (collect ~credit) or breaches the short strike
+    (lose ~max_loss). For exact P&L we'd need OA fill data, which we
+    don't have. Useful for relative comparison across bots; absolute
+    values are estimates.
+    """
+    base_tier = _base_tier_for_pnl(signal_tier)
+    params = PNL_PER_LOT.get(base_tier)
     if params is None:
         return 0
-    return params['credit'] if correct else -params['max_loss']
+    per_lot = params['credit'] if correct else -params['max_loss']
+    return per_lot * (contracts if contracts and contracts > 0 else 1)
 
 
 def _parse_date_from_timestamp(ts: str) -> Optional[str]:
@@ -514,8 +549,12 @@ def section_trades_placed(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     losses = [s for s in traded if 'WRONG' in s['outcome']]
     win_rate = len(wins) / len(traded) * 100
 
-    # P&L
-    total_pnl = sum(_pnl_for_trade(s['signal'], 'CORRECT' in s['outcome']) for s in traded)
+    # P&L (scaled by Contracts column from each trade's row; defaults to 1
+    # when missing — handles legacy rows pre-multibot)
+    total_pnl = sum(
+        _pnl_for_trade(s['signal'], 'CORRECT' in s['outcome'], s.get('contracts') or 1)
+        for s in traded
+    )
 
     # Streak
     streak = 0
@@ -535,7 +574,7 @@ def section_trades_placed(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         {'label': 'Total Trades', 'value': str(len(traded)), 'sentiment': 'neutral'},
         {'label': 'Win Rate', 'value': f"{win_rate:.1f}%",
          'sentiment': 'positive' if win_rate >= 70 else 'warning' if win_rate >= 50 else 'negative'},
-        {'label': 'Est. P&L (1-lot)', 'value': f"${total_pnl:+,}",
+        {'label': 'Est. P&L', 'value': f"${total_pnl:+,}",
          'sentiment': 'positive' if total_pnl > 0 else 'negative'},
         {'label': 'Current Streak', 'value': streak_label,
          'sentiment': 'positive' if streak_type else 'negative'},
@@ -550,7 +589,10 @@ def section_trades_placed(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         t_wins = [s for s in tier_trades if 'CORRECT' in s['outcome']]
         t_losses = [s for s in tier_trades if 'WRONG' in s['outcome']]
         t_moves = [s['overnight_move'] for s in tier_trades if s['overnight_move'] is not None]
-        t_pnl = sum(_pnl_for_trade(tier, 'CORRECT' in s['outcome']) for s in tier_trades)
+        t_pnl = sum(
+            _pnl_for_trade(tier, 'CORRECT' in s['outcome'], s.get('contracts') or 1)
+            for s in tier_trades
+        )
         threshold = MOVE_THRESHOLDS.get(tier, 0.80)
 
         short_name = tier.replace('TRADE_', '')
@@ -650,7 +692,8 @@ def section_trades_placed(parts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         best_day = float('-inf')
         worst_day = float('inf')
         for s in traded:
-            day_pnl = _pnl_for_trade(s['signal'], 'CORRECT' in s['outcome'])
+            day_pnl = _pnl_for_trade(s['signal'], 'CORRECT' in s['outcome'],
+                                     s.get('contracts') or 1)
             cumulative += day_pnl
             running_pnl.append(cumulative)
             best_day = max(best_day, day_pnl)
@@ -1738,6 +1781,226 @@ def section_new_indicators(
 # TEXT RENDERING (for terminal output)
 # ============================================================================
 
+def _bucket_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute summary stats for a group of trade rows.
+
+    Used by the multibot breakdown to summarize per-bucket / per-DOW-variant
+    performance. Returns dict with: count, wins, win_rate, mean_pnl,
+    total_pnl, mean_move, mean_contracts.
+    """
+    if not rows:
+        return {'count': 0, 'wins': 0, 'win_rate': 0.0, 'mean_pnl': 0.0,
+                'total_pnl': 0.0, 'mean_move': None, 'mean_contracts': 0.0}
+
+    wins = sum(1 for r in rows if 'CORRECT' in (r.get('outcome') or ''))
+    pnls = [_pnl_for_trade(r['signal'], 'CORRECT' in r.get('outcome', ''),
+                           r.get('contracts') or 1)
+            for r in rows]
+    moves = [r['overnight_move'] for r in rows if r.get('overnight_move') is not None]
+    contracts_list = [r.get('contracts') or 1 for r in rows]
+
+    return {
+        'count': len(rows),
+        'wins': wins,
+        'win_rate': 100.0 * wins / len(rows),
+        'mean_pnl': _mean(pnls) if pnls else 0.0,
+        'total_pnl': sum(pnls),
+        'mean_move': _mean(moves) if moves else None,
+        'mean_contracts': _mean(contracts_list) if contracts_list else 0.0,
+    }
+
+
+def section_multibot_breakdown(
+    signals: List[Dict[str, Any]], parts: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Section 10: Multi-bot conditional-dimension breakdown.
+
+    Only renders when the analyzed data includes Phase 2 conditional dimensions
+    (VVIX bucket, DOW multiplier, hedge attached). For Bot A and butterfly,
+    these columns are blank → returns None and the section doesn't appear.
+
+    Tables produced (conditional on what's populated):
+      - VVIX bucket performance (Bot D / F)
+      - DOW variant performance  (Bot E / F)
+      - Hedge attached vs not    (Bot F EXTREME variants only)
+      - VVIX bucket source audit (Bot D / F — % on percentile_252d vs static_fallback)
+    """
+    traded = parts.get('traded', [])
+    with_outcomes = [t for t in traded if 'CORRECT' in (t.get('outcome') or '')
+                     or 'WRONG' in (t.get('outcome') or '')]
+
+    if not with_outcomes:
+        return None
+
+    # Detect which dimensions are populated. Each bot bot D/E/F surfaces a
+    # subset of these via the transform hook — we only show tables that
+    # have at least 2 distinct non-empty values to compare.
+    vvix_buckets = sorted({(s.get('vvix_bucket') or '') for s in with_outcomes
+                           if s.get('vvix_bucket')})
+    dow_mults    = sorted({(s.get('dow_multiplier') or '') for s in with_outcomes
+                           if s.get('dow_multiplier')})
+
+    # Bucket source audit data (only relevant when at least one row has it set)
+    source_rows = [s for s in with_outcomes if s.get('vvix_bucket_source')]
+
+    has_vvix = len(vvix_buckets) >= 2
+    has_dow  = len(dow_mults) >= 2
+    has_source_audit = bool(source_rows)
+
+    # Hedge breakdown only meaningful if we have BOTH hedged and unhedged rows
+    hedge_yes = [s for s in with_outcomes if s.get('hedge_attached')
+                 in (True, 'TRUE', 'True', 'true')]
+    hedge_no  = [s for s in with_outcomes if s.get('hedge_attached')
+                 in (False, 'FALSE', 'False', 'false', '', None)]
+    has_hedge = bool(hedge_yes and hedge_no)
+
+    if not (has_vvix or has_dow or has_source_audit or has_hedge):
+        return None
+
+    kpis: List[Dict[str, Any]] = []
+    text_blocks: List[str] = []
+    tables: List[Dict[str, Any]] = []
+
+    # ── KPI: total trades + which dimensions are present ──
+    dims = []
+    if has_vvix:   dims.append(f"VVIX ({len(vvix_buckets)} buckets)")
+    if has_dow:    dims.append(f"DOW ({len(dow_mults)} variants)")
+    if has_hedge:  dims.append("Hedge attached")
+    kpis.append({'label': 'Multi-bot trades', 'value': str(len(with_outcomes)),
+                 'sentiment': 'neutral'})
+    kpis.append({'label': 'Conditional dimensions', 'value': ', '.join(dims) or '—',
+                 'sentiment': 'neutral'})
+
+    # ── VVIX bucket breakdown (Bot D / F) ──
+    if has_vvix:
+        rows: List[List[str]] = []
+        # Order buckets by Q1→Q4 if standard names, else alphabetic
+        bucket_order = ['LOW', 'NORMAL', 'HIGH', 'EXTREME']
+        ordered = [b for b in bucket_order if b in vvix_buckets]
+        ordered += [b for b in vvix_buckets if b not in bucket_order]
+        for bucket in ordered:
+            grp = [s for s in with_outcomes if s.get('vvix_bucket') == bucket]
+            if not grp:
+                continue
+            stats = _bucket_stats(grp)
+            move_str = f"{stats['mean_move']:.2f}%" if stats['mean_move'] is not None else "—"
+            rows.append([
+                bucket,
+                str(stats['count']),
+                f"{stats['win_rate']:.1f}%",
+                f"${stats['mean_pnl']:+,.0f}",
+                f"${stats['total_pnl']:+,.0f}",
+                move_str,
+                f"{stats['mean_contracts']:.1f}",
+            ])
+        tables.append({
+            'caption': 'Performance by VVIX bucket (Bot D / F conditioning dimension)',
+            'headers': ['Bucket', 'Trades', 'Win %', 'Mean P&L/trade',
+                        'Total P&L', 'Mean overnight move', 'Avg contracts'],
+            'rows': rows,
+            'col_classes': ['', 'num', 'num', 'num', 'num', 'num', 'num'],
+        })
+        text_blocks.append(
+            "Per Papagelis & Dotsis (2025) Table 6: overnight VRP grows ~6× from "
+            "Q1 (LOW) to Q4 (EXTREME) of VVIX. If the Mean P&L/trade row above does "
+            "NOT increase from LOW→EXTREME (after sample size grows past 30 per "
+            "bucket), the VVIX-conditioning hypothesis isn't holding for this trial."
+        )
+
+    # ── DOW variant breakdown (Bot E / F) ──
+    if has_dow:
+        rows = []
+        # Order: BOOST → NORMAL → SKIP variants alphabetically last
+        def _dow_sort_key(d: str) -> tuple:
+            if 'BOOST' in d.upper(): return (0, d)
+            if 'NORMAL' in d.upper() or d == '1.0': return (1, d)
+            return (2, d)
+        for variant in sorted(dow_mults, key=_dow_sort_key):
+            grp = [s for s in with_outcomes if s.get('dow_multiplier') == variant]
+            if not grp:
+                continue
+            stats = _bucket_stats(grp)
+            move_str = f"{stats['mean_move']:.2f}%" if stats['mean_move'] is not None else "—"
+            rows.append([
+                variant,
+                str(stats['count']),
+                f"{stats['win_rate']:.1f}%",
+                f"${stats['mean_pnl']:+,.0f}",
+                f"${stats['total_pnl']:+,.0f}",
+                move_str,
+                f"{stats['mean_contracts']:.1f}",
+            ])
+        tables.append({
+            'caption': 'Performance by DOW variant (Bot E / F conditioning dimension)',
+            'headers': ['DOW variant', 'Trades', 'Win %', 'Mean P&L/trade',
+                        'Total P&L', 'Mean overnight move', 'Avg contracts'],
+            'rows': rows,
+            'col_classes': ['', 'num', 'num', 'num', 'num', 'num', 'num'],
+        })
+        text_blocks.append(
+            "Per Papagelis & Dotsis Table 4 Panel B: Monday close-to-open is the "
+            "richest weekly window. BOOST (Mon/Fri entries) should outperform "
+            "NORMAL (Tue/Wed) on mean P&L per trade if the DOW conditioning "
+            "hypothesis is holding."
+        )
+
+    # ── Hedge attached vs not (Bot F EXTREME) ──
+    if has_hedge:
+        s_yes = _bucket_stats(hedge_yes)
+        s_no  = _bucket_stats(hedge_no)
+        rows = [
+            ['HEDGED',   str(s_yes['count']), f"{s_yes['win_rate']:.1f}%",
+             f"${s_yes['mean_pnl']:+,.0f}", f"${s_yes['total_pnl']:+,.0f}"],
+            ['unhedged', str(s_no['count']),  f"{s_no['win_rate']:.1f}%",
+             f"${s_no['mean_pnl']:+,.0f}",  f"${s_no['total_pnl']:+,.0f}"],
+        ]
+        tables.append({
+            'caption': 'Hedged vs unhedged trades (Bot F EXTREME bucket only)',
+            'headers': ['', 'Trades', 'Win %', 'Mean P&L/trade', 'Total P&L'],
+            'rows': rows,
+            'col_classes': ['', 'num', 'num', 'num', 'num'],
+        })
+
+    # ── VVIX bucket source audit (Bot D / F) ──
+    if has_source_audit:
+        sources = {}
+        for s in source_rows:
+            src = s.get('vvix_bucket_source') or 'unknown'
+            sources[src] = sources.get(src, 0) + 1
+        total_src = sum(sources.values())
+        rows = []
+        for src in sorted(sources):
+            cnt = sources[src]
+            pct = 100.0 * cnt / total_src if total_src else 0
+            rows.append([src, str(cnt), f"{pct:.1f}%"])
+        tables.append({
+            'caption': 'VVIX bucket source audit',
+            'headers': ['Source', 'Trades', '% of total'],
+            'rows': rows,
+            'col_classes': ['', 'num', 'num'],
+        })
+        # Warn if static_fallback exceeds 5% (per the methodology doc threshold)
+        fb = sources.get('static_fallback', 0)
+        fb_pct = 100.0 * fb / total_src if total_src else 0
+        if fb_pct > 5.0:
+            text_blocks.append(
+                f"⚠ static_fallback fired on {fb_pct:.1f}% of trades (threshold 5%). "
+                f"Polygon VVIX history fetch is unreliable for this period — Bot D/F "
+                f"empirical alignment with Papagelis Table 6 is degraded."
+            )
+
+    if not tables:
+        return None
+
+    return {
+        'id': 'multibot-breakdown',
+        'title': '10. Multi-Bot Conditional Dimensions',
+        'kpis': kpis,
+        'text_blocks': text_blocks,
+        'tables': tables,
+    }
+
+
 def _sections_to_text(sections: List[Dict[str, Any]]) -> str:
     """Convert structured section dicts to plain text for terminal output."""
     lines = []
@@ -1937,6 +2200,12 @@ def run_analysis(min_rows: int = 0, desk_filter: str = 'overnight_condors') -> L
     s9 = section_new_indicators(parts)
     if s9:
         result_sections.append(s9)
+
+    # Section 10: Multi-bot breakdown (only renders for Phase 2 desks D/E/F
+    # where conditional dimensions like VVIX bucket / DOW variant are populated)
+    s10 = section_multibot_breakdown(signals, parts)
+    if s10:
+        result_sections.append(s10)
 
     return result_sections
 

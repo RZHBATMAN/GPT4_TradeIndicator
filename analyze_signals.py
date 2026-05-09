@@ -22,6 +22,7 @@ from desks.overnight_condors.analyze_signals import (  # noqa: F401
     # Public API
     run_analysis,
     load_signal_data,
+    section_multibot_breakdown,
     # Constants
     MOVE_THRESHOLDS,
     NO_TRADE_THRESHOLD,
@@ -36,6 +37,9 @@ from desks.overnight_condors.analyze_signals import (  # noqa: F401
     _partition_signals,
     _with_outcomes,
     _sections_to_text,
+    _pnl_for_trade,
+    _base_tier_for_pnl,
+    _bucket_stats,
 )
 
 

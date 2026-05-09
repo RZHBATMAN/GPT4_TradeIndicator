@@ -4,7 +4,6 @@ Background thread that iterates all desks, checks each desk's window,
 and pokes when due. Each desk's window + daily cache is instance state.
 """
 import os
-import random
 import threading
 import time as time_module
 from datetime import datetime, time as dt_time
@@ -39,15 +38,10 @@ def start_scheduler(desks, base_url=None, is_local=False):
     def _poke_loop():
         print("[POKE] Background thread started")
 
-        # Per-desk randomized first-poke minute
-        _poke_dates = {}  # desk_id -> last date
-        _first_poke_minutes = {}  # desk_id -> randomized minute
-
         while True:
             try:
                 now = datetime.now(ET_TZ)
                 current_time = now.time()
-                today_str = now.strftime('%Y-%m-%d')
 
                 # Reset alert dedup at midnight
                 if current_time.hour == 0 and current_time.minute == 0 and current_time.second < 30:
@@ -56,20 +50,14 @@ def start_scheduler(desks, base_url=None, is_local=False):
                 for desk in desks:
                     desk_id = desk.desk_id
 
-                    # Pick a random first-poke minute for each new day
-                    if _poke_dates.get(desk_id) != today_str:
-                        _poke_dates[desk_id] = today_str
-                        _first_poke_minutes[desk_id] = random.randint(
-                            desk.poke_minutes[0], desk.poke_minutes[0] + 9
-                        )
-                        print(f"[POKE] {desk_id}: first trigger at :{_first_poke_minutes[desk_id]:02d}")
-
                     if desk.is_within_window(now):
                         record_poke()
-                        first_min = _first_poke_minutes.get(desk_id, desk.poke_minutes[0])
-                        trigger_minutes = [first_min] + desk.poke_minutes[1:]
-
-                        if current_time.minute in trigger_minutes and current_time.second < 30:
+                        # Fixed-time pokes per desk.poke_minutes (no randomization).
+                        # For overnight desks: [30, 50, 10] → fires at 1:30, 1:50, 2:10
+                        # exactly. The webhook-once-per-day cache in each desk's
+                        # _daily_signal_cache makes pokes 2 and 3 effectively retries
+                        # if poke 1's webhook failed.
+                        if current_time.minute in desk.poke_minutes and current_time.second < 30:
                             # All desks register at /{desk_id}/trigger — canonical convention.
                             # See memory/feedback_url_conventions.md for the rule.
                             trigger_url = f"{base_url}/{desk_id}/trigger"
